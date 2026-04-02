@@ -1,8 +1,44 @@
 import { VAD } from './audio/vad.js'
 import { transcribe } from './audio/whisper.js'
 import { decide, setMode, Mode } from './pipeline/decision.js'
+import { warmupEmbeddings } from './pipeline/embeddings.js'
 import { speak } from './pipeline/tts.js'
+import { clearMemory, getContext } from './pipeline/memory.js'
 import { CONFIG } from './config.js'
+
+const COOLDOWN_MS = 5000
+const ACTIVE_MODE_TIMEOUT_MS = 10000
+
+async function ariaRespond(transcript: string): Promise<void> {
+  const ctx = getContext()
+  const memLine = ctx.lastOffer
+    ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
+    : ctx.lastIntent
+    ? `Last intent: ${ctx.lastIntent}.`
+    : ''
+
+  const res = await fetch(CONFIG.OLLAMA_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: CONFIG.OLLAMA_MODEL,
+      messages: [
+        {
+          role: 'system',
+          content: `You are ARIA, a personal AI assistant in an earpiece. 
+Be extremely concise — max 12 words. Direct answers only. No filler. No preamble.
+${memLine}`
+        },
+        { role: 'user', content: transcript }
+      ],
+      stream: false,
+    })
+  })
+  const data = await res.json() as { message: { content: string } }
+  const response = data.message.content.trim()
+  console.log(`[ARIA ACTIVE] "${response}"`)
+  speak(response)
+}
 
 async function init() {
   const modeArg = process.argv.find(a => a.startsWith('--mode='))
@@ -14,57 +50,105 @@ async function init() {
   await transcribe(silence)
   console.log('[INIT] whisper ready')
 
+  console.log('[INIT] warming up embeddings...')
+  await warmupEmbeddings()
+  console.log('[INIT] embeddings ready')
+
   speak('online')
-  console.log('[INIT] tts ready')
 
   const vad = new VAD()
 
-  vad.on('speechStart', () => {
-    console.log('\n[VAD] ▶ speech start')
-  })
+  let lastFiredAt = 0
+  let processingChunk = false
+  let ariaActive = false
+  let activeTimeout: ReturnType<typeof setTimeout> | null = null
 
-  vad.on('misfire', () => {
-    console.log('[VAD] ✗ misfire — too short')
-  })
+  function inCooldown(): boolean {
+    return Date.now() - lastFiredAt < COOLDOWN_MS
+  }
 
-  vad.on('speechEnd', async (audio: Buffer) => {
-    const t0 = Date.now()
-    const tWhisperStart = Date.now()
+  function activateAria() {
+    ariaActive = true
+    if (activeTimeout) clearTimeout(activeTimeout)
+    activeTimeout = setTimeout(() => {
+      ariaActive = false
+      console.log('[MODE] passive — timeout')
+    }, ACTIVE_MODE_TIMEOUT_MS)
+    console.log('[MODE] active')
+    speak('yes')
+  }
 
-    console.log(`[VAD] ■ speech end — ${(audio.length / 2 / CONFIG.SAMPLE_RATE * 1000).toFixed(0)}ms of audio`)
+  function deactivateAria() {
+    ariaActive = false
+    if (activeTimeout) clearTimeout(activeTimeout)
+    console.log('[MODE] passive')
+  }
+
+  async function processAudio(audio: Buffer, label: string) {
+    if (processingChunk) {
+      console.log(`[SKIP] ${label} — already processing`)
+      return
+    }
+
+    processingChunk = true
 
     try {
       const transcript = await transcribe(audio)
-      const tWhisper = Date.now() - tWhisperStart
-      console.log(`[WHISPER] ${tWhisper}ms — "${transcript}"`)
+      if (!transcript) return
 
-      if (!transcript) {
-        console.log('[WHISPER] empty — skipping')
+      console.log(`[${label}] — "${transcript}"`)
+
+      if (ariaActive) {
+        await ariaRespond(transcript)
+        deactivateAria()
         return
       }
 
-      const tDecisionStart = Date.now()
+      if (inCooldown()) {
+        console.log(`[SKIP] ${label} — cooldown`)
+        return
+      }
+
       const decision = await decide(transcript)
-      const tDecision = Date.now() - tDecisionStart
-      console.log(`[DECISION] ${tDecision}ms — "${decision ?? 'PASS'}"`)
+      if (!decision) return
 
-      if (!decision) {
-        console.log(`[PASS] total: ${Date.now() - t0}ms`)
+      // ARIA_QUERY — user is talking to ARIA directly
+      if (decision === 'ARIA_QUERY') {
+        activateAria()
+        await ariaRespond(transcript)
+        deactivateAria()
         return
       }
 
-      const tTTSStart = Date.now()
+      console.log(`[FIRE] "${decision}"`)
+      lastFiredAt = Date.now()
       speak(decision)
-      const tTTS = Date.now() - tTTSStart
-
-      const total = Date.now() - t0
-      console.log(`[TTS] ${tTTS}ms queued`)
-      console.log(`[✓] whisper:${tWhisper}ms + decision:${tDecision}ms + tts:${tTTS}ms = ${total}ms total`)
-      console.log(`[✓] "${transcript}" → "${decision}"`)
 
     } catch (err) {
-      console.error('[ERROR]', err)
+      console.error(`[ERROR] ${label}`, err)
+    } finally {
+      processingChunk = false
     }
+  }
+
+  vad.on('speechStart', () => console.log('\n[VAD] ▶ speech start'))
+  vad.on('misfire', () => console.log('[VAD] ✗ misfire'))
+
+  vad.on('snapDetected', () => {
+    if (ariaActive) {
+      deactivateAria()
+    } else {
+      activateAria()
+    }
+  })
+
+  vad.on('speechChunk', async (audio: Buffer) => {
+    await processAudio(audio, 'CHUNK')
+  })
+
+  vad.on('speechEnd', async (audio: Buffer) => {
+    console.log(`[VAD] ■ speech end — ${(audio.length / 2 / CONFIG.SAMPLE_RATE * 1000).toFixed(0)}ms`)
+    await processAudio(audio, 'END')
   })
 
   vad.on('error', (err: Error) => {
@@ -73,11 +157,12 @@ async function init() {
   })
 
   vad.start()
-  console.log(`\nARIA online — mode: ${mode}\n`)
+  console.log(`\nARIA online — mode: ${mode} — double snap to activate\n`)
 
   process.on('SIGINT', () => {
     console.log('\nshutting down')
     vad.stop()
+    clearMemory()
     process.exit(0)
   })
 }
