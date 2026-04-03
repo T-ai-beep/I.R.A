@@ -1,0 +1,15 @@
+KEY PEOPLE IN TANAY'S LIFE
+
+--- FAMILY ---
+Manav Shah — Father. Lives at home in Allen TX. Cricket enthusiast.
+Rudrakshi Shah — Mother. Lives at home in Allen TX.
+Tanishi Shah — Sister. Lives at home in Allen TX.
+Note: Parents currently underestimate Tanay's ambitions. He does not seek their validation — he uses their doubt as fuel.
+
+--- BUSINESS ---
+Nathan Barcroft — TTC co-founder, frontend. Owns frontend/React layer. Being brought into ARIA to own HUD/React overlay. Manages repo branch structure.
+Brendan Hancock — TTC co-founder, frontend + design. Delivered the working deployed TTC frontend.
+
+--- INVESTORS ---
+No named investors yet. Early conversations in progress for TTC.
+Strategy: hold valuation, don't give equity cheap, defer C-Corp until first customer revenue.

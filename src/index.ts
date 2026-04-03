@@ -6,7 +6,7 @@ import { speak } from './pipeline/tts.js'
 import { clearMemory, getContext, remember } from './pipeline/memory.js'
 import { loadKnowledgeBase, ragQuery, saveToHistory } from './pipeline/rag.js'
 import { getDueResurfaces, markResurfaced } from './pipeline/tasks.js'
-import { getDueFollowUps, markFollowUpResurfaced } from './pipeline/followup.js'
+import { getDueFollowUps, markFollowUpResurfaced, getResurfaceMessage } from './pipeline/followup.js'
 import { CONFIG } from './config.js'
 
 const COOLDOWN_MS = 5000
@@ -45,6 +45,7 @@ async function ariaRespond(transcript: string): Promise<string> {
 Be extremely concise — max 15 words. Direct answers only. No filler. No preamble.
 If asked to fact-check, give the correct fact in one sentence.
 If asked what to say, give the exact words to say.
+Use ONLY the context provided below to answer questions about people, deals, or background. Never guess or hallucinate. If the context does not contain the answer, say "not in context".
 ${memLine}${ragLine}${leverageLine}`,
         },
         { role: 'user', content: transcript },
@@ -91,10 +92,8 @@ function startResurfaceLoop(
     const dueFollowUps = getDueFollowUps()
     if (dueFollowUps.length > 0) {
       const fu = dueFollowUps[0]
-      const action = fu.suggestedAction
-      const personSuffix = fu.person ? ` — ${fu.person}` : ''
-      const msg = `${action}${personSuffix}`
-      console.log(`[RESURFACE] follow-up — "${msg}"`)
+      const msg = getResurfaceMessage(fu)
+      console.log(`[RESURFACE] follow-up [${fu.priority}] — "${msg}"`)
       speakFn(msg)
       markFollowUpResurfaced(fu.id)
     }

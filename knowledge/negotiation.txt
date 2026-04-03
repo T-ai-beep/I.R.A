@@ -1,0 +1,25 @@
+NEGOTIATION + SALES CONTEXT
+
+--- TTC OBJECTIONS ---
+Competitor objection (ServiceTitan): Challenge what's missing. ServiceTitan is expensive, complex, overkill for smaller HVAC operators. TTC is built for the operator who wants control without the enterprise overhead.
+Price objection: Anchor to ROI. One missed job or dispatch error costs more than the monthly fee.
+"We already have a system": Ask what's broken about it. Every operator has a pain point.
+"Need to think about it": Ask what would make the decision easy. Then wait.
+"Not my decision": Ask who decides and offer to present directly.
+
+--- BORING SOLUTIONS OBJECTIONS ---
+Price ($1,500 upfront + $150/month): ROI anchor — one avoided equipment failure pays for a year of the tool.
+"We track it manually": Ask how many times something slipped. There's always a story.
+"We're a small operation": That's the target. Built for small, not enterprise.
+
+--- INVESTOR CONVERSATIONS ---
+Strategy: Don't give equity cheap. Hold valuation. Defer C-Corp until first customer.
+If they lowball: "We're not raising at that valuation. Come back when you're serious."
+If they ask about traction: Be honest — backend complete, frontend deployed, first customer is the next milestone. That's the real story.
+If they want to move fast: Slow down. Urgency on their side is leverage on yours.
+
+--- GENERAL PRINCIPLES ---
+Never accept the first offer.
+Silence after a price is stated is a weapon — use it.
+Whoever talks first after a number loses.
+Always know what the other side wants more than the deal itself.

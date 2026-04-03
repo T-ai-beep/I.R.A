@@ -5,6 +5,7 @@ import { remember, getContext } from './memory.js'
 import { extractTaskFromTranscript, addTask, getTaskContext } from './tasks.js'
 import { updatePeopleFromTranscript, getPeopleContext } from './people.js'
 import { detectFollowUp, createFollowUp, getFollowUpContext } from './followup.js'
+import { logDecision, getPatternContext } from "../pipeline/decisionLog.js"
 
 export type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -43,7 +44,8 @@ function classifyEvent(transcript: string): EventType {
   return 'UNKNOWN'
 }
 
-const HIGH_IMPACT: EventType[] = ['PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT']
+// QUESTION added — so "who is X", "what should I say" etc. reach LLM fallback
+const HIGH_IMPACT: EventType[] = ['PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS']
 
 function isHighImpact(event: EventType): boolean {
   return HIGH_IMPACT.includes(event)
@@ -64,7 +66,8 @@ async function llmFallback(transcript: string, event: EventType): Promise<string
 
   const taskCtx = getTaskContext()
   const followUpCtx = getFollowUpContext()
-  const extraCtx = [taskCtx, followUpCtx].filter(Boolean).join('\n')
+  const patternCtx = getPatternContext()
+  const extraCtx = [taskCtx, followUpCtx, patternCtx].filter(Boolean).join('\n')
 
   const res = await fetch(CONFIG.OLLAMA_URL, {
     method: 'POST',
@@ -103,7 +106,7 @@ function processSideEffects(transcript: string, intent: string | null, offer: nu
   const fuDetected = detectFollowUp(transcript)
   if (fuDetected) {
     const peopleCtx = getPeopleContext(transcript)
-    createFollowUp(transcript, fuDetected, peopleCtx ?? undefined)
+    createFollowUp(transcript, fuDetected, peopleCtx ?? undefined).catch(console.error)
   }
 
   // 3. Detect and store task
@@ -130,6 +133,7 @@ export async function decide(transcript: string): Promise<string | null> {
   const ruleHit = matchRule(transcript, currentMode)
   if (ruleHit) {
     console.log(`[RULE] ${Date.now() - t0}ms — "${ruleHit}"`)
+    logDecision(transcript, event, ruleHit, 'rule', currentMode, null, turn.offer)
     return ruleHit
   }
 
@@ -137,14 +141,16 @@ export async function decide(transcript: string): Promise<string | null> {
   const embedMatch = await matchEmbedding(transcript)
   if (embedMatch) {
     console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
+    logDecision(transcript, event, embedMatch.action, 'embedding', currentMode, null, turn.offer)
     return embedMatch.action
   }
 
-  // 3. LLM — only for high impact events rules + embeddings missed
+  // 3. LLM — high impact events that rules + embeddings missed
   if (isHighImpact(event)) {
     console.log(`[LLM] fallback for ${event}`)
     const llmResult = await llmFallback(transcript, event)
     console.log(`[LLM] ${Date.now() - t0}ms — "${llmResult ?? 'PASS'}"`)
+    if (llmResult) logDecision(transcript, event, llmResult, 'llm', currentMode, null, turn.offer)
     return llmResult
   }
 
@@ -154,4 +160,4 @@ export async function decide(transcript: string): Promise<string | null> {
 
 // ── Re-export context helpers for index.ts ─────────────────────────────────
 
-export { getTaskContext, getPeopleContext, getFollowUpContext }
+export { getTaskContext, getPeopleContext, getFollowUpContext, getPatternContext }

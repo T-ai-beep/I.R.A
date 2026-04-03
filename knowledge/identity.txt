@@ -1,0 +1,40 @@
+ARIA OWNER: TANAY MANAV SHAH
+
+Age: 16 (born May 9, 2009)
+Location: Allen, TX — 2005 Acton Dr, Allen TX 75013
+School: Allen High School, Grade 11, Class of 2027
+Religion: Hindu-Jain. Practices daily — does puja/divo every morning before school. Faith is core, not cultural.
+
+--- PERSONALITY ---
+Competitive, systems thinker, hacker instinct. Top 60 globally in picoCTF.
+Communicates in terse direct bursts. Hates being over-explained to.
+Ships fast and figures it out — does not over-plan.
+Responds well to blunt feedback. Pushes back when reasoning is wrong.
+Deeply motivated by legacy, not money. Wants to be the bar — the person kids look up to and try to beat.
+Quote he lives by: "If they can't see themselves reaching the height you want to be, they'll say you can't do it."
+
+--- ROLE MODELS ---
+Alex Hormozi — studies his thinking, work ethic, and business frameworks closely.
+Steve Jobs — wants to become the new standard, like Jobs was. Not copy him. Become someone future founders say they wanted to beat.
+Iman Gadzhi — lifestyle inspiration.
+
+--- WEAKNESSES TO WATCH ---
+Caves on price too fast in sales/pitch situations — ARIA should flag this early.
+Gets distracted by new side projects when primary projects hit hard moments — ARIA should call this out.
+Parents and others underestimate him. He uses that as fuel, not validation-seeking.
+
+--- DAILY ROUTINE ---
+Wake up → shower → get ready → puja/divo → pack bag → eat breakfast → school → home → work → sleep.
+
+--- HOW PEOPLE MISREAD HIM ---
+First impression: people think he's just a rich kid with no ambition.
+Reality: one of the most driven 16-year-olds building real products. Let that gap work as an advantage.
+
+--- TECHNICAL SKILLS ---
+TypeScript/Node.js, Rust/Tauri, Ollama (local LLM on M4 Mac), CI/CD, n8n automations, full-stack.
+Shipped and sold ReachFlow on Gumroad. Not a hobbyist.
+
+--- LONG TERM VISION ---
+Retire May 9 2049. $100M net worth, $10M/year passive income.
+European luxury city — preferably Italian beach. Supercars, freedom, minimal friction.
+Main goal: become the standard. The person future founders want to beat.

@@ -1,0 +1,29 @@
+TANAY'S BUSINESSES
+
+--- TTC (Tech to Customer) ---
+What it is: HVAC field service management SaaS. Direct ServiceTitan competitor.
+What it sells: Dispatch, job tracking, customer portal, booking widget, call tracking, email marketing, escalation engine, automation engine, multi-region support.
+Team: Tanay built entire backend solo. Nathan Barcroft owns frontend/React. Brendan Hancock owns frontend + design.
+Status: Backend substantially complete. Frontend deployed. No first paying customer yet.
+Real risk: Distribution. Everything else is noise until first paying customer lands.
+Pricing: Not finalized publicly.
+Investor situation: Early conversations in progress. Advised to decline low-valuation offers. Defer Delaware C-Corp until first customer revenue.
+
+--- ARIA ---
+What it is: Real-time always-on AI decision assistant running in an earpiece. Local processing, no cloud, no subscription.
+Hardware target: Brilliant Labs Halo — arriving May 2026. Hard deadline for Phases 1-5.
+Vision: EDITH/Iron Man personal AI OS. Long-term platform through 2029.
+Differentiators: Local processing, proactive behavior, unified architecture (emotion, memory, routing, RAG all working together).
+Competitors: Ray-Ban Meta, Brilliant Labs Noa.
+Current state: Full pipeline working — VAD, Whisper, rules/embeddings/LLM, memory, tasks, people, follow-ups, RAG, TTS.
+
+--- Boring Solutions ---
+What it is: Automated equipment/maintenance log tracker with email/SMS alerts.
+Target clients: Small cash-heavy service businesses — HVAC, plumbing, landscaping.
+Pricing: $1,500 upfront + $150/month recurring.
+Status: MVP built. Focused on outreach and closing deals.
+
+--- Past Projects ---
+ReachFlow: Cold email generator micro-SaaS. Sold on Gumroad. Proof Tanay can ship and close.
+Vaero: Survey/biometric awareness app with WHOOP/Oura/Apple Health integrations. Stalled, not a priority.
+OfficeFlow: Email + calendar productivity tool. MVP built. Not active focus.
