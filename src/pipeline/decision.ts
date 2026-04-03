@@ -2,6 +2,9 @@ import { CONFIG } from '../config.js'
 import { matchEmbedding } from './embeddings.js'
 import { matchRule } from './rules.js'
 import { remember, getContext } from './memory.js'
+import { extractTaskFromTranscript, addTask, getTaskContext } from './tasks.js'
+import { updatePeopleFromTranscript, getPeopleContext } from './people.js'
+import { detectFollowUp, createFollowUp, getFollowUpContext } from './followup.js'
 
 export type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -59,6 +62,10 @@ async function llmFallback(transcript: string, event: EventType): Promise<string
     ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
     : ''
 
+  const taskCtx = getTaskContext()
+  const followUpCtx = getFollowUpContext()
+  const extraCtx = [taskCtx, followUpCtx].filter(Boolean).join('\n')
+
   const res = await fetch(CONFIG.OLLAMA_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -66,7 +73,10 @@ async function llmFallback(transcript: string, event: EventType): Promise<string
       model: CONFIG.OLLAMA_MODEL,
       messages: [
         { role: 'system', content: TIGHT_PROMPT },
-        { role: 'user', content: `${contextLine}\nEvent: ${event}\nTranscript: "${transcript}"` },
+        {
+          role: 'user',
+          content: `${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nEvent: ${event}\nTranscript: "${transcript}"`,
+        },
       ],
       stream: false,
     }),
@@ -83,13 +93,38 @@ async function llmFallback(transcript: string, event: EventType): Promise<string
   return raw.split(/\s+/).slice(0, 4).join(' ')
 }
 
+// ── Side effects: tasks, people, follow-ups ────────────────────────────────
+
+function processSideEffects(transcript: string, intent: string | null, offer: number | null): void {
+  // 1. Update people records
+  updatePeopleFromTranscript(transcript, intent, offer)
+
+  // 2. Detect and store follow-up
+  const fuDetected = detectFollowUp(transcript)
+  if (fuDetected) {
+    const peopleCtx = getPeopleContext(transcript)
+    createFollowUp(transcript, fuDetected, peopleCtx ?? undefined)
+  }
+
+  // 3. Detect and store task
+  const taskData = extractTaskFromTranscript(transcript)
+  if (taskData) {
+    addTask(taskData)
+  }
+}
+
+// ── Main decide ───────────────────────────────────────────────────────────
+
 export async function decide(transcript: string): Promise<string | null> {
   const t0 = Date.now()
 
   // store in memory
-  remember(transcript)
+  const turn = remember(transcript)
   const event = classifyEvent(transcript)
   console.log(`[EVENT] ${event}`)
+
+  // side effects (non-blocking, fire async)
+  processSideEffects(transcript, turn.intent, turn.offer)
 
   // 1. rules — 0ms, exact patterns
   const ruleHit = matchRule(transcript, currentMode)
@@ -116,3 +151,7 @@ export async function decide(transcript: string): Promise<string | null> {
   console.log(`[PASS] ${Date.now() - t0}ms`)
   return null
 }
+
+// ── Re-export context helpers for index.ts ─────────────────────────────────
+
+export { getTaskContext, getPeopleContext, getFollowUpContext }
