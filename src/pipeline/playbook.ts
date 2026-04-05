@@ -1,0 +1,752 @@
+/**
+ * playbook.ts
+ * Execution engine. Not a script library — a pressure system.
+ *
+ * Architecture:
+ *   Each play has 4 escalation tiers, not flat variants.
+ *   Tier 0 = probe     — soft, open
+ *   Tier 1 = isolate   — narrow the objection
+ *   Tier 2 = pressure  — remove exits
+ *   Tier 3 = corner    — binary, commit or walk
+ *
+ *   Silence is a weapon. [SILENCE] marker = stop talking after delivering.
+ *   Timeline plays control urgency independently of objection plays.
+ *   Every play logs tier + key for instrumentation.
+ */
+
+import * as fs from 'fs'
+import * as path from 'path'
+import * as os from 'os'
+import { EventType } from './decision.js'
+
+// ── Types ──────────────────────────────────────────────────────────────────
+
+export type PlaybookKey =
+  | 'PRICE_OBJECTION'
+  | 'DISCOUNT_REQUEST'
+  | 'COMPETITOR_LOCKIN'
+  | 'MANUAL_TRACKING'
+  | 'AUTHORITY_BLOCK'
+  | 'STALL_GENERIC'
+  | 'TIMING_DEFLECTION'
+  | 'BUDGET_FROZEN'
+  | 'INFO_REQUEST'
+  | 'AGREEMENT_SIGNAL'
+  | 'PANIC_LOSING'
+  | 'COMP_ANCHOR'
+  | 'WEAK_ANSWER'
+
+export type EscalationTier = 0 | 1 | 2 | 3
+
+export type PressureLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
+
+export interface EscalationStep {
+  tier: EscalationTier
+  label: string        // probe | isolate | pressure | corner
+  response: string     // what ARIA says
+  silence: boolean     // true = stop talking after this line
+  binary: boolean      // true = forces yes/no from prospect
+}
+
+export interface Play {
+  key: PlaybookKey
+  pressureLevel: PressureLevel
+  mustRespond: boolean
+  steps: EscalationStep[]
+}
+
+// ── Instrumentation ────────────────────────────────────────────────────────
+
+const ARIA_DIR   = path.join(os.homedir(), '.aria')
+const PLAYS_FILE = path.join(ARIA_DIR, 'plays.jsonl')
+
+interface PlayFire {
+  ts: number
+  key: PlaybookKey
+  tier: EscalationTier
+  response: string
+  silence: boolean
+  binary: boolean
+}
+
+function ensureDir() {
+  if (!fs.existsSync(ARIA_DIR)) fs.mkdirSync(ARIA_DIR, { recursive: true })
+}
+
+function logPlayFire(fire: PlayFire) {
+  ensureDir()
+  try {
+    fs.appendFileSync(PLAYS_FILE, JSON.stringify(fire) + '\n')
+  } catch {}
+}
+
+// ── Escalation tier tracking ───────────────────────────────────────────────
+// Tracks how many times each play has fired in this session.
+// More fires = higher tier = more pressure.
+
+const tierState: Partial<Record<PlaybookKey, number>> = {}
+
+export function getNextTier(key: PlaybookKey): EscalationTier {
+  const current = tierState[key] ?? 0
+  tierState[key] = current + 1
+  return Math.min(current, 3) as EscalationTier
+}
+
+export function resetTiers(): void {
+  for (const key of Object.keys(tierState) as PlaybookKey[]) {
+    delete tierState[key]
+  }
+}
+
+// ── The Playbook ──────────────────────────────────────────────────────────
+
+export const PLAYBOOK: Record<PlaybookKey, Play> = {
+
+  // ── Price objection ───────────────────────────────────────────────────────
+  PRICE_OBJECTION: {
+    key: 'PRICE_OBJECTION',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'What part of the price concerns you most — the total or the monthly?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'So if the price was not the issue, you would move forward today?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Every week without this costs you more than the monthly fee. That math does not get better.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Simple question — is price the real reason, or is there something else stopping you?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Discount / trial request ──────────────────────────────────────────────
+  DISCOUNT_REQUEST: {
+    key: 'DISCOUNT_REQUEST',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'Price is not flexible. What value are you not seeing that makes this feel like too much?',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'If I could show you this pays for itself in thirty days, would that change things?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'We do not discount. What we do is solve the problem at the price that reflects what it is worth.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Are you negotiating price because you want a deal, or because you are not convinced this works? Tell me which.',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Competitor lock-in ────────────────────────────────────────────────────
+  COMPETITOR_LOCKIN: {
+    key: 'COMPETITOR_LOCKIN',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'What is the one thing your current system does not handle well?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'So the system works — but that one problem has been there how long?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Three years with the same gap is not loyalty. It is the cost of inertia.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Honest question — are you staying because it works, or because switching feels like work?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Manual tracking ───────────────────────────────────────────────────────
+  MANUAL_TRACKING: {
+    key: 'MANUAL_TRACKING',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'When did something last slip through doing it manually?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'How much did that slip cost you — in time, money, or the customer?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Manual works until it does not. And when it breaks, it breaks at the worst moment.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Is "it works fine" true, or is it just what you say because fixing it feels like effort?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Authority block ───────────────────────────────────────────────────────
+  AUTHORITY_BLOCK: {
+    key: 'AUTHORITY_BLOCK',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'What does she need to see to feel good about this?',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'If she says yes, are you ready to move forward this week?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Can we get her on a call for fifteen minutes? I want to answer her questions directly.',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Is this actually about her approval, or are you still deciding yourself?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Stall ─────────────────────────────────────────────────────────────────
+  STALL_GENERIC: {
+    key: 'STALL_GENERIC',
+    pressureLevel: 'MEDIUM',
+    mustRespond: false,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'What specifically needs to happen before you can decide?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'Is the delay about the decision itself, or something about the offer?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'The problem you have right now does not pause while you think. What is the cost of another week?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Are you going to move forward, yes or no? I would rather know now.',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Timing deflection ─────────────────────────────────────────────────────
+  TIMING_DEFLECTION: {
+    key: 'TIMING_DEFLECTION',
+    pressureLevel: 'MEDIUM',
+    mustRespond: false,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'What changes next quarter that does not exist right now?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'If timing is the only issue, can we agree on terms now and start then?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Every month you delay this is a month your competitor is not delaying.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Next quarter is not a plan. Give me a specific date or tell me this is a no.',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Budget frozen ─────────────────────────────────────────────────────────
+  BUDGET_FROZEN: {
+    key: 'BUDGET_FROZEN',
+    pressureLevel: 'MEDIUM',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'When exactly does the budget reset?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'If we lock in terms now and start billing when it resets, does that work?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'What is the cost of the problem continuing until the budget opens?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Budget is a reason, not a wall. Who has the authority to make an exception for something that pays for itself?',
+        silence: true,
+        binary: false,
+      },
+    ],
+  },
+
+  // ── Info request ──────────────────────────────────────────────────────────
+  INFO_REQUEST: {
+    key: 'INFO_REQUEST',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'I will send it today. When specifically can you review it — Thursday morning?',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'What in the info will make or break the decision for you?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Info goes out today. If it answers your questions, are you ready to move that same week?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Is requesting info the path to yes, or the path to a polite no?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Agreement signal ──────────────────────────────────────────────────────
+  AGREEMENT_SIGNAL: {
+    key: 'AGREEMENT_SIGNAL',
+    pressureLevel: 'CRITICAL',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'Good. What does your timeline look like to get started?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'Contract goes out today. Who signs on your end?',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'I can have everything ready by end of day. What do you need from me to make that happen?',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Let us close this now. I will send the contract, you sign this week — yes?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Panic — deal collapsing ───────────────────────────────────────────────
+  PANIC_LOSING: {
+    key: 'PANIC_LOSING',
+    pressureLevel: 'CRITICAL',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'Before you close this out — what was the deciding factor?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'Is this final, or is there one thing I could address that reopens it?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'You signed with them — but the problem that brought you here still exists. When does that matter?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'I respect it. One last question — if their solution does not work in ninety days, will you call me?',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Comp anchor ───────────────────────────────────────────────────────────
+  COMP_ANCHOR: {
+    key: 'COMP_ANCHOR',
+    pressureLevel: 'HIGH',
+    mustRespond: true,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'Is that number based on base only, or total package including equity?',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'If the total comp hit your number including equity and upside, would base matter less?',
+        silence: true,
+        binary: true,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Here is what the role is worth and why. The number is built around what you will actually produce.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Are you negotiating because the number is wrong, or because you always negotiate? Tell me which.',
+        silence: true,
+        binary: true,
+      },
+    ],
+  },
+
+  // ── Weak answer ───────────────────────────────────────────────────────────
+  WEAK_ANSWER: {
+    key: 'WEAK_ANSWER',
+    pressureLevel: 'MEDIUM',
+    mustRespond: false,
+    steps: [
+      {
+        tier: 0,
+        label: 'probe',
+        response: 'Lead with the result. What was the specific outcome?',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 1,
+        label: 'isolate',
+        response: 'Give me one number that proves that point.',
+        silence: true,
+        binary: false,
+      },
+      {
+        tier: 2,
+        label: 'pressure',
+        response: 'Vague answers lose. State the conclusion first, then the story.',
+        silence: false,
+        binary: false,
+      },
+      {
+        tier: 3,
+        label: 'corner',
+        response: 'Say it in one sentence. If you cannot, you do not own the answer yet.',
+        silence: false,
+        binary: false,
+      },
+    ],
+  },
+}
+
+// ── Timeline control plays (independent of objection type) ────────────────
+// These fire as augmentation when urgency needs to be injected.
+
+export interface TimelinePlay {
+  key: string
+  trigger: RegExp
+  response: string
+  silence: boolean
+}
+
+export const TIMELINE_PLAYS: TimelinePlay[] = [
+  {
+    key: 'RISK_REVERSAL',
+    trigger: /not sure|taking a risk|worried|nervous|guarantee/i,
+    response: 'If this does not pay for itself in thirty days, tell me and we fix it. That is the deal.',
+    silence: false,
+  },
+  {
+    key: 'LOSS_FRAMING',
+    trigger: /maybe later|next month|think about it|not urgent/i,
+    response: 'Every week this sits costs you X. The delay is not free.',
+    silence: true,
+  },
+  {
+    key: 'DEADLINE_COMPRESSION',
+    trigger: /whenever|no rush|whenever works|take your time/i,
+    response: 'If we do not start this week, your next realistic window is months out. That is the real timeline.',
+    silence: true,
+  },
+  {
+    key: 'MICRO_COMMITMENT',
+    trigger: /i guess|maybe|probably|might/i,
+    response: 'Before we go further — are you open to solving this problem, yes or no?',
+    silence: true,
+  },
+  {
+    key: 'OPPORTUNITY_COST',
+    trigger: /not a priority|other things|busy right now/i,
+    response: 'What is the cost of your current problem at the end of this quarter if nothing changes?',
+    silence: true,
+  },
+]
+
+// ── Signal detection ──────────────────────────────────────────────────────
+
+interface PlaybookSignal {
+  pattern: RegExp
+  key: PlaybookKey
+  priority: number
+}
+
+const SIGNALS: PlaybookSignal[] = [
+  // Closing — highest priority
+  { pattern: /let's do it|send me the contract|we're ready|we're in|i'll take it|i'm in|when do we start|move forward/i,                       key: 'AGREEMENT_SIGNAL',   priority: 12 },
+  { pattern: /already signed|signed with them|went with|decided.*instead|chose.*over you/i,                                                      key: 'PANIC_LOSING',       priority: 12 },
+
+  // Money
+  { pattern: /too expensive|can't afford|too much|out of budget|not worth|switching cost|fifteen hundred.*too|upfront.*too|too much for a small/i, key: 'PRICE_OBJECTION',    priority: 11 },
+  { pattern: /discount|lower the price|any flexibility|can you do better|trial period|lower upfront|work with us on the price|come in lower/i,    key: 'DISCOUNT_REQUEST',   priority: 11 },
+  { pattern: /looking for.*range|in the range of|\$[\d,]+k? to \$[\d,]+k?|salary expectations|expecting.*\$[\d,]+/i,                             key: 'COMP_ANCHOR',        priority: 11 },
+
+  // Competitor / manual
+  { pattern: /track.*manually|do it manually|works fine.*manual|we track everything manually|pen and paper|spreadsheet for that/i,                key: 'MANUAL_TRACKING',    priority: 10 },
+  { pattern: /happy with.*current|been using.*\d+ years|already (use|have)|service.?titan|jobber|went with|signed with|chose.*instead/i,         key: 'COMPETITOR_LOCKIN',  priority: 10 },
+
+  // Authority
+  { pattern: /talk to my (wife|husband|spouse)|she handles|he handles|my (wife|husband) (handles|manages)/i,                                     key: 'AUTHORITY_BLOCK',    priority: 10 },
+  { pattern: /check with my (team|boss|manager|ceo|cfo|partner|business partner)|need approval|not my (call|decision)|run it by/i,               key: 'AUTHORITY_BLOCK',    priority: 10 },
+
+  // Budget / timing
+  { pattern: /budget is (frozen|gone|tight|limited)|no budget|budget.*doesn't allow|when budget resets/i,                                        key: 'BUDGET_FROZEN',      priority: 10 },
+  { pattern: /next (quarter|year|month)|not right now|bad timing|reconnect next/i,                                                               key: 'TIMING_DEFLECTION',  priority: 9  },
+
+  // Info / stall
+  { pattern: /send me (more )?info|send.*details|email me|can you send|more information about what you offer/i,                                   key: 'INFO_REQUEST',       priority: 9  },
+  { pattern: /need to think|think about it|get back to you|not (sure|ready)|let me consider|another offer/i,                                     key: 'STALL_GENERIC',      priority: 8  },
+
+  // Weak
+  { pattern: /i don't know|i guess|kind of|sort of|it depends|not really sure/i,                                                                 key: 'WEAK_ANSWER',        priority: 6  },
+]
+
+// ── Match transcript to play ──────────────────────────────────────────────
+
+export function matchPlaybook(transcript: string): Play | null {
+  const sorted = [...SIGNALS].sort((a, b) => b.priority - a.priority)
+  for (const signal of sorted) {
+    if (signal.pattern.test(transcript)) {
+      return PLAYBOOK[signal.key]
+    }
+  }
+  return null
+}
+
+// ── Execute play at current escalation tier ───────────────────────────────
+
+export function executePlay(play: Play): string {
+  const tier  = getNextTier(play.key)
+  const step  = play.steps[tier]
+
+  const fire: PlayFire = {
+    ts:       Date.now(),
+    key:      play.key,
+    tier,
+    response: step.response,
+    silence:  step.silence,
+    binary:   step.binary,
+  }
+  logPlayFire(fire)
+
+  const silenceMarker = step.silence ? ' [SILENCE]' : ''
+  console.log(`[PLAY] ${play.key} tier=${tier}/${step.label} binary=${step.binary}${silenceMarker}`)
+
+  return step.response
+}
+
+// ── Match timeline play ───────────────────────────────────────────────────
+
+export function matchTimelinePlay(transcript: string): TimelinePlay | null {
+  for (const play of TIMELINE_PLAYS) {
+    if (play.trigger.test(transcript)) return play
+  }
+  return null
+}
+
+// ── Forced response events — PASS not allowed ─────────────────────────────
+
+export const FORCED_RESPONSE_EVENTS: Set<EventType> = new Set([
+  'PRICE_OBJECTION',
+  'AGREEMENT',
+  'COMPETITOR',
+  'AUTHORITY',
+  'OFFER_DISCUSS',
+  'DEADLINE',
+])
+
+// ── Fallback responses for forced events with no play match ───────────────
+
+const FORCED_FALLBACKS: Partial<Record<EventType, string>> = {
+  PRICE_OBJECTION: 'What part of the price concerns you most?',
+  AGREEMENT:       'Good. Who signs and what is the timeline?',
+  COMPETITOR:      'What is the one thing your current system does not handle?',
+  AUTHORITY:       'Who is the final decision maker and can we get them on a call?',
+  OFFER_DISCUSS:   'What would make this number feel right to you?',
+  DEADLINE:        'What needs to happen before that date?',
+}
+
+export function getForcedFallback(event: EventType): string | null {
+  return FORCED_FALLBACKS[event] ?? null
+}
+
+// ── Playbook analytics — which plays fire, which convert ─────────────────
+
+export function getPlayStats(): Record<string, { fires: number; tiers: number[] }> {
+  if (!fs.existsSync(PLAYS_FILE)) return {}
+  try {
+    const lines = fs.readFileSync(PLAYS_FILE, 'utf-8').trim().split('\n').filter(Boolean)
+    const stats: Record<string, { fires: number; tiers: number[] }> = {}
+    for (const line of lines) {
+      const fire = JSON.parse(line) as PlayFire
+      if (!stats[fire.key]) stats[fire.key] = { fires: 0, tiers: [] }
+      stats[fire.key].fires++
+      stats[fire.key].tiers.push(fire.tier)
+    }
+    return stats
+  } catch { return {} }
+}

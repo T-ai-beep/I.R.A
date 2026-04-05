@@ -9,9 +9,10 @@ import { logDecision, getPatternContext } from './decisionLog.js'
 import { selectBestAction, ActionCandidate, BestAction } from './actionSelector.js'
 import { recordSuccess, recordIgnored } from './adaptiveWeights.js'
 import { steer, getTrajectoryContext } from './steering.js'
-import { storeEpisode, getEpisodicContext } from "../pipeline/epsodic.js"
+import { storeEpisode, getEpisodicContext } from '../pipeline/epsodic.js'
 import { getIdentityContext, getHighImportancePeople } from './identityScore.js'
 import { createPressureItem } from './pressure.js'
+import { matchPlaybook, executePlay, FORCED_RESPONSE_EVENTS, getForcedFallback } from './playbook.js'
 
 export type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -36,23 +37,24 @@ export function setMode(mode: Mode): void {
 export function getMode(): Mode {
   return currentMode
 }
+
 export { classifyEvent }
 
 function classifyEvent(transcript: string): EventType {
   const t = transcript.toLowerCase()
-  if (/can't afford|too expensive|too much|no budget|price is|can't spend/.test(t)) return 'PRICE_OBJECTION'
+  if (/can't afford|too expensive|too much|no budget|price is|can't spend|fifteen hundred.*too|upfront is.*too/.test(t)) return 'PRICE_OBJECTION'
   if (/need to think|get back|not sure|maybe|not ready/.test(t)) return 'STALLING'
-  if (/check with|my team|my boss|need approval|not my call|run it by/.test(t)) return 'AUTHORITY'
-  if (/already use|currently use|we have|service.?titan|competitor/.test(t)) return 'COMPETITOR'
-  if (/sounds good|we're in|let's do it|i'll take|deal|move forward/.test(t)) return 'AGREEMENT'
+  if (/check with|my team|my boss|need approval|not my call|run it by|my wife|my husband/.test(t)) return 'AUTHORITY'
+  if (/already use|currently use|we have|service.?titan|competitor|went with|signed with|chose.*instead/.test(t)) return 'COMPETITOR'
+  if (/sounds good|we're in|let's do it|i'll take it|deal|move forward|i'm in/.test(t)) return 'AGREEMENT'
   if (/\?$/.test(t.trim())) return 'QUESTION'
-  if (/\$|per month|a year|pricing|cost|budget/.test(t)) return 'OFFER_DISCUSS'
+  if (/\$|per month|a year|pricing|cost|budget|range of/.test(t)) return 'OFFER_DISCUSS'
   if (/deadline|by friday|by monday|end of week|next week|asap/.test(t)) return 'DEADLINE'
   return 'UNKNOWN'
 }
 
 const HIGH_IMPACT: EventType[] = [
-  'PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS'
+  'PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS',
 ]
 
 function isHighImpact(event: EventType): boolean {
@@ -66,7 +68,7 @@ phrase is 2 words max.
 If nothing actionable: PASS
 No explanation. No punctuation. No quotes.`
 
-// ── LLM fallback — with hard latency cap ─────────────────────────────────
+// ── LLM fallback ──────────────────────────────────────────────────────────
 
 async function llmFallback(
   transcript: string,
@@ -78,7 +80,7 @@ async function llmFallback(
     ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
     : ''
 
-  const taskCtx    = getTaskContext()
+  const taskCtx     = getTaskContext()
   const followUpCtx = getFollowUpContext()
   const patternCtx  = getPatternContext()
   const extraCtx    = [taskCtx, followUpCtx, patternCtx].filter(Boolean).join('\n')
@@ -112,7 +114,7 @@ async function llmFallback(
 
     if (!raw || raw.toUpperCase() === 'PASS') return null
 
-    const actions = ['Reject','Accept','Ask','Push','Wait','Challenge','Clarify','Delay','Anchor','Exit']
+    const actions = ['Reject', 'Accept', 'Ask', 'Push', 'Wait', 'Challenge', 'Clarify', 'Delay', 'Anchor', 'Exit']
     if (!actions.some(a => raw.startsWith(a))) return null
 
     return raw.split(/\s+/).slice(0, 4).join(' ')
@@ -122,7 +124,7 @@ async function llmFallback(
   }
 }
 
-// ── Side effects ───────────────────────────────────────────────────────────
+// ── Side effects ──────────────────────────────────────────────────────────
 
 function processSideEffects(
   transcript: string,
@@ -130,16 +132,13 @@ function processSideEffects(
   offer: number | null,
   person: string | null
 ): void {
-  // people
   updatePeopleFromTranscript(transcript, intent, offer)
 
-  // follow-up
   const fuDetected = detectFollowUp(transcript)
   if (fuDetected) {
     const pCtx = getPeopleContext(transcript)
     createFollowUp(transcript, fuDetected, pCtx ?? undefined)
       .then(fu => {
-        // register in pressure system
         createPressureItem(
           fu.id, 'followup', fu.suggestedAction,
           fu.person, fu.priority, fuDetected.delayHours * 3600_000
@@ -148,7 +147,6 @@ function processSideEffects(
       .catch(console.error)
   }
 
-  // task
   const taskData = extractTaskFromTranscript(transcript)
   if (taskData) {
     const task = addTask(taskData)
@@ -159,7 +157,6 @@ function processSideEffects(
     )
   }
 
-  // episodic memory — store as structured event
   storeEpisode(transcript, person).catch(console.error)
 }
 
@@ -167,31 +164,46 @@ function processSideEffects(
 
 export async function decide(transcript: string): Promise<string | null> {
   const t0       = Date.now()
-  const deadline = t0 + CONFIG.LATENCY_BUDGET_MS   // hard cap
+  const deadline = t0 + CONFIG.LATENCY_BUDGET_MS
 
   // memory
   const turn  = remember(transcript)
   const event = classifyEvent(transcript)
   console.log(`[EVENT] ${event}`)
 
-  // extract primary person from transcript for context
   const person = turn.speaker !== 'unknown'
-    ? null   // speaker known — no name needed
+    ? null
     : transcript.match(/([A-Z][a-z]{1,14})/)?.[1] ?? null
 
   // side effects (non-blocking)
   processSideEffects(transcript, turn.intent, turn.offer, person)
 
-  // ── steering — predict trajectory ─────────────────────────────────────
+  // ── steering ──────────────────────────────────────────────────────────
   const steering = await steer(transcript, false)
   if (steering.preloadMessage) {
     console.log(`[STEER] preload → "${steering.preloadMessage}"`)
   }
 
-  // ── collect candidates ─────────────────────────────────────────────────
+  // ── collect candidates ────────────────────────────────────────────────
   const candidates: ActionCandidate[] = []
 
-  // 1. Rule (0ms)
+  // 0. PLAYBOOK — zero latency, precomputed executable responses
+  //    Runs before rules/embeddings/LLM so it always contributes a candidate
+  //    mustRespond plays score 0.95 — beat embeddings, lose to rules
+  const play = matchPlaybook(transcript)
+  if (play) {
+    const playbookResponse = executePlay(play)
+    const playbookScore    = play.mustRespond ? 0.95 : 0.70
+    candidates.push({
+      command: 'WAIT',
+      message: playbookResponse,
+      source:  'rule',
+      score:   playbookScore,
+    })
+    console.log(`[PLAY] ${play.key} score=${playbookScore} — "${playbookResponse}"`)
+  }
+
+  // 1. Rule engine (0ms)
   const ruleHit = matchRule(transcript, currentMode)
   if (ruleHit) {
     candidates.push({ command: 'WAIT', message: ruleHit, source: 'rule', score: 1.0 })
@@ -207,7 +219,7 @@ export async function decide(transcript: string): Promise<string | null> {
     }
   }
 
-  // 3. LLM — only if high impact AND time budget remains
+  // 3. LLM — only high impact events with time budget
   if (isHighImpact(event) && Date.now() < deadline - 200) {
     const llmResult = await llmFallback(transcript, event, deadline)
     if (llmResult) {
@@ -215,9 +227,19 @@ export async function decide(transcript: string): Promise<string | null> {
       console.log(`[LLM] ${Date.now() - t0}ms — "${llmResult}"`)
     }
   } else if (!isHighImpact(event) && !candidates.length) {
-    // non-high-impact, no rule/embed hit — use steering preload if available
     if (steering.preloadMessage) {
       candidates.push({ command: 'WAIT', message: steering.preloadMessage, source: 'rule', score: 0.65 })
+    }
+  }
+
+  // ── FORCED RESPONSE — certain events can NEVER return null ────────────
+  //    If we still have no candidates and this is a money/closing moment,
+  //    fire the precomputed fallback. No silent moments on critical signals.
+  if (!candidates.length && FORCED_RESPONSE_EVENTS.has(event)) {
+    const fallback = getForcedFallback(event)
+    if (fallback) {
+      console.log(`[FORCED] ${event} — no candidates, firing fallback`)
+      candidates.push({ command: 'WAIT', message: fallback, source: 'rule', score: 0.60 })
     }
   }
 
@@ -226,14 +248,29 @@ export async function decide(transcript: string): Promise<string | null> {
     return null
   }
 
-  // ── select best ────────────────────────────────────────────────────────
+  // ── select best ───────────────────────────────────────────────────────
   const best: BestAction | null = selectBestAction(candidates, event)
   if (!best) return null
+
+  // ── mustRespond override ──────────────────────────────────────────────
+  // If playbook says mustRespond but scoring picked a lower-value observational
+  // label (e.g. "⚠ Price objection — fear signal"), override with the
+  // playbook's executable response instead.
+  if (play?.mustRespond) {
+    const playbookCandidate = candidates.find(c => c.score === 0.95)
+    const isObservationalLabel = best.message.startsWith('⚠') || best.message.includes('fear signal') || best.message.includes('frame breaking') || best.message.includes('pain unaddressed')
+    if (playbookCandidate && isObservationalLabel) {
+      console.log(`[EXEC] mustRespond override — swapping label for executable response`)
+      const execMessage = playbookCandidate.message
+      logDecision(transcript, event, execMessage, 'rule', currentMode, person, turn.offer)
+      console.log(`[DECIDE] ${Date.now() - t0}ms — "${execMessage}" [playbook override]`)
+      return execMessage
+    }
+  }
 
   const totalMs = Date.now() - t0
   console.log(`[DECIDE] ${totalMs}ms — "${best.message}" urgency=${best.urgency} conf=${best.confidence}`)
 
-  // ── identity boost — mention high-importance person → escalate urgency ──
   const highImportance = getHighImportancePeople(transcript)
   if (highImportance.length) {
     console.log(`[IDENTITY] ${highImportance[0].urgencyLabel}`)
@@ -244,12 +281,11 @@ export async function decide(transcript: string): Promise<string | null> {
   return best.message
 }
 
-// ── Outcome feedback — wires to adaptive weights ───────────────────────────
+// ── Outcome feedback ──────────────────────────────────────────────────────
 
 export function reportOutcome(message: string, outcome: 'success' | 'ignored' | 'lost'): void {
   if (outcome === 'success') recordSuccess(message)
-  else if (outcome === 'ignored') recordIgnored(message)
-  else recordIgnored(message) // lost also penalizes
+  else recordIgnored(message)
 }
 
 // ── Re-export context helpers ─────────────────────────────────────────────
