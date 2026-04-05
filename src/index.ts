@@ -1,16 +1,11 @@
 /**
  * index.ts
- * ARIA — instant response architecture.
+ * ARIA — streaming pipeline
  *
- * Core change: zero cooldown on the hot path.
- * As soon as VAD fires speechEnd → transcribe → decide → speak.
- * No artificial delay. No polling gate. No cooldown block.
- *
- * The only guard is processingChunk — prevents a second transcription
- * from stomping the first if audio chunks overlap. That's it.
- *
- * Pressure poll runs every 30s but ONLY when ARIA is idle (not processing
- * and not in active mode). It never interrupts a live decision.
+ * Changes from previous version:
+ * 1. decide() now calls speak() internally — removed redundant speak() here
+ * 2. ariaRespond() uses streaming LLM → TTS via same pattern as llmFallbackStreaming
+ * 3. No other logic changed
  */
 
 const ACTIVE_MODE_TIMEOUT_MS = 12_000
@@ -52,7 +47,10 @@ async function init() {
 
   const { VAD } = await import('./audio/vad.js')
 
-  // ── Active ARIA response (called when snap-activated or ARIA_QUERY) ───────
+  // ── ariaRespond: streaming LLM → TTS ─────────────────────────────────────
+  // Mirrors llmFallbackStreaming — speaks as tokens arrive.
+  // Called when snap-activated or QUESTION event with no rule hit.
+
   async function ariaRespond(transcript: string): Promise<string> {
     const ctx = getContext()
     const memLine = ctx.lastOffer
@@ -66,37 +64,89 @@ async function init() {
       getTrajectoryContext(), await getEpisodicContext(transcript), getIdentityContext(transcript),
     ].filter(Boolean).join('\n\n')
 
-    const res = await fetch(CONFIG.OLLAMA_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: CONFIG.OLLAMA_MODEL,
-        messages: [
-          {
-            role: 'system',
-            content: `You are ARIA, a real-time personal AI in an earpiece.
+    const systemPrompt = `You are ARIA, a real-time personal AI in an earpiece.
 Max ${MAX_SPOKEN_WORDS} words. Format: ACTION — phrase. Example: "Wait — unclear intent"
 Use ONLY context provided. If not in context say "not in context".
-${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
-          },
-          { role: 'user', content: transcript },
-        ],
-        stream: false,
-      }),
-    })
+${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
 
-    const data = await res.json() as { message: { content: string } }
-    const raw  = enforceOutput(data.message.content.trim())
-    saveToHistory({ ts: Date.now(), transcript, intent: ctx.lastIntent, response: raw })
-    console.log(`[ARIA] "${raw}"`)
-    speak(raw)
+    let fullResponse = ''
+    let buffer       = ''
+    let firstToken   = true
+    const t0         = Date.now()
+
+    try {
+      const res = await fetch(CONFIG.OLLAMA_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: CONFIG.OLLAMA_MODEL,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user',   content: transcript },
+          ],
+          stream: true,   // ← streaming
+        }),
+      })
+
+      if (!res.body) throw new Error('no body')
+
+      const reader  = res.body.getReader()
+      const decoder = new TextDecoder()
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+
+        const chunk = decoder.decode(value, { stream: true })
+
+        for (const line of chunk.split('\n')) {
+          const trimmed = line.trim()
+          if (!trimmed) continue
+
+          let parsed: { message?: { content?: string }; done?: boolean }
+          try { parsed = JSON.parse(trimmed) } catch { continue }
+          if (parsed.done) break
+
+          const token = parsed.message?.content ?? ''
+          if (!token) continue
+
+          if (firstToken) {
+            console.log(`[ARIA] first token @ ${Date.now() - t0}ms`)
+            firstToken = false
+          }
+
+          buffer       += token
+          fullResponse += token
+
+          // Speak every 3 words
+          const wordCount = buffer.trim().split(/\s+/).filter(Boolean).length
+          if (wordCount >= 3) {
+            const clean = enforceOutput(buffer.trim())
+            if (clean) speak(clean)
+            buffer = ''
+          }
+        }
+      }
+
+      // Flush tail
+      const tail = enforceOutput(buffer.trim())
+      if (tail) speak(tail)
+
+    } catch (e) {
+      console.error('[ARIA] stream error', e)
+      // Fallback: speak what we have
+      if (fullResponse.trim()) speak(enforceOutput(fullResponse.trim()))
+    }
+
+    const raw = enforceOutput(fullResponse.trim())
+    saveToHistory({ ts: Date.now(), transcript, intent: getContext().lastIntent, response: raw })
+    console.log(`[ARIA] "${raw}" total=${Date.now() - t0}ms`)
     return raw
   }
 
-  // ── Pressure poll — only fires when ARIA is idle ──────────────────────────
+  // ── Pressure poll ─────────────────────────────────────────────────────────
   function startPressureLoop(speakFn: (t: string) => void, isActive: () => boolean): NodeJS.Timeout {
     return setInterval(() => {
-      // Never interrupt live processing
       if (isActive()) return
 
       const forced = getForcedItems()
@@ -130,8 +180,6 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
 
   const vad = new VAD()
 
-  // processingChunk: true while a transcription + decision is in flight
-  // ariaActive: true when snap-activated (ARIA answers next utterance directly)
   let processingChunk = false
   let ariaActive      = false
   let activeTimeout: ReturnType<typeof setTimeout> | null = null
@@ -157,16 +205,6 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
 
   const pressureTimer = startPressureLoop(speak, isActive)
 
-  // ── Core audio handler — THIS IS THE HOT PATH ─────────────────────────────
-  // Called on both speechChunk (partial) and speechEnd (full utterance).
-  // speechEnd always wins — if processingChunk is true from a chunk, speechEnd
-  // will be queued and fire as soon as the chunk finishes.
-  //
-  // No cooldown. No artificial delay. Transcribe → decide → speak.
-  // The rule engine runs in <5ms. Embeddings run in ~50ms.
-  // LLM only fires for high-impact events and has a 300ms budget.
-  // Total latency target: <400ms from end of speech to spoken response.
-
   async function processAudio(audio: Buffer, label: string) {
     if (processingChunk) {
       console.log(`[SKIP] ${label} — already processing`)
@@ -177,7 +215,6 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
       const transcript = await transcribe(audio)
       if (!transcript) return
 
-      // Filter whisper noise tokens
       if (/^\[.*\]$/.test(transcript.trim())) {
         console.log(`[SKIP] ${label} — noise token "${transcript}"`)
         return
@@ -186,19 +223,18 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
       console.log(`[${label}] — "${transcript}"`)
       saveToHistory({ ts: Date.now(), transcript, intent: null, response: null })
 
-      // ── Active mode: ARIA answers directly, then returns to passive ──────
+      // Active mode: ARIA answers directly
       if (ariaActive) {
         await ariaRespond(transcript)
         deactivateAria()
         return
       }
 
-      // ── Passive mode: run the decision pipeline immediately ───────────────
-      // No cooldown check. Every utterance gets evaluated.
-      // The decision pipeline itself filters noise (PASS path returns null).
+      // Passive mode: decision pipeline
+      // NOTE: decide() now calls speak() internally on every path.
+      // We do NOT call speak() here again.
       const decision = await decide(transcript)
 
-      // No decision — check if it was a question and route to ariaRespond
       if (!decision) {
         const last = getLastTurn()
         if (last?.intent === 'QUESTION') {
@@ -208,7 +244,6 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
         return
       }
 
-      // ARIA_QUERY — activate and answer
       if (decision === 'ARIA_QUERY') {
         activateAria()
         await ariaRespond(transcript)
@@ -216,12 +251,12 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
         return
       }
 
-      // Standard coaching output — speak immediately
+      // decision already spoken inside decide() — just log
       const enforced = enforceOutput(decision)
       console.log(`[FIRE] "${enforced}"`)
       emitARSignal('RED', enforced)
       saveToHistory({ ts: Date.now(), transcript, intent: null, response: enforced })
-      speak(enforced)
+      // ← NO speak() call here. decide() already spoke it.
 
     } catch (err) {
       console.error(`[ERROR] ${label}`, err)
@@ -230,24 +265,17 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
     }
   }
 
-  // ── VAD event wiring ──────────────────────────────────────────────────────
   vad.on('speechStart',  () => console.log('\n[VAD] ▶ speech start'))
   vad.on('misfire',      () => console.log('[VAD] ✗ misfire'))
   vad.on('snapDetected', () => ariaActive ? deactivateAria() : activateAria())
 
-  // speechChunk: partial audio every 2s during long speech.
-  // Only process if not already processing — avoids duplicate decisions.
   vad.on('speechChunk', async (audio: Buffer) => {
     if (!processingChunk) processAudio(audio, 'CHUNK')
   })
 
-  // speechEnd: full utterance. This is the PRIMARY trigger.
-  // Always attempt to process — processingChunk guard handles overlap.
   vad.on('speechEnd', async (audio: Buffer) => {
     const ms = (audio.length / 2 / CONFIG.SAMPLE_RATE * 1000).toFixed(0)
     console.log(`[VAD] ■ speech end — ${ms}ms`)
-    // speechEnd always wins over chunk — if chunk is processing, skip it
-    // (chunk will be superseded by the complete utterance anyway)
     processAudio(audio, 'END')
   })
 
