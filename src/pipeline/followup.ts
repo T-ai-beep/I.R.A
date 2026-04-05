@@ -201,9 +201,7 @@ export async function createFollowUp(
   detected: DetectedFollowUp,
   context?: string
 ): Promise<FollowUp> {
-  // Generate draft async — don't block pipeline
-  const draft = await generateDraft(transcript, detected.action, detected.person, detected.priority)
-
+  // Create and save immediately — no draft yet
   const fu: FollowUp = {
     id: genId(),
     created: Date.now(),
@@ -213,7 +211,7 @@ export async function createFollowUp(
     trigger: transcript,
     person: detected.person,
     suggestedAction: detected.action,
-    draft,
+    draft: null,  // start null
     resurfaceAt: Date.now() + detected.delayHours * 3600 * 1000,
     resurfaced: 0,
     context: context ?? null,
@@ -223,9 +221,16 @@ export async function createFollowUp(
   all.push(fu)
   saveAll(all)
 
-  const draftStatus = draft ? 'draft ready' : 'no draft'
-  console.log(`[FOLLOWUP] ${detected.priority.toUpperCase()} — "${fu.suggestedAction}"${fu.person ? ` re: ${fu.person}` : ''} — ${draftStatus} — resurface in ${detected.delayHours}h`)
+  // Generate draft async — don't block
+  generateDraft(transcript, detected.action, detected.person, detected.priority)
+    .then(draft => {
+      const latest = loadAll()
+      const target = latest.find(f => f.id === fu.id)
+      if (target) { target.draft = draft; saveAll(latest) }
+    })
+    .catch(() => {})
 
+  console.log(`[FOLLOWUP] ${detected.priority.toUpperCase()} — "${fu.suggestedAction}"${fu.person ? ` re: ${fu.person}` : ''} — draft generating async — resurface in ${detected.delayHours}h`)
   return fu
 }
 

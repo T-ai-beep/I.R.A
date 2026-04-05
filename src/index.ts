@@ -19,14 +19,13 @@ function urgencyToARSignal(urgency: string): ARSignal {
 }
 
 async function init() {
-  // All imports lazy — nothing resolves at module load time
   const { CONFIG }            = await import('./config.js')
   const { transcribe }        = await import('./audio/whisper.js')
   const { decide, setMode, getTaskContext, getPeopleContext, getFollowUpContext, getTrajectoryContext, getEpisodicContext, getIdentityContext }
                               = await import('./pipeline/decision.js')
   const { warmupEmbeddings }  = await import('./pipeline/embeddings.js')
   const { speak }             = await import('./pipeline/tts.js')
-  const { clearMemory, getContext } = await import('./pipeline/memory.js')
+  const { clearMemory, getContext, getLastTurn } = await import('./pipeline/memory.js')
   const { loadKnowledgeBase, ragQuery, saveToHistory } = await import('./pipeline/rag.js')
   const { getDueItems, getForcedItems, fireItem } = await import('./pipeline/pressure.js')
 
@@ -34,14 +33,6 @@ async function init() {
 
   const modeArg = process.argv.find(a => a.startsWith('--mode='))
   const mode    = (modeArg?.split('=')[1] ?? 'negotiation') as Mode
-
-  // Demo exits before any audio init
-  if (process.argv.includes('--demo')) {
-    const scenario = (process.argv.find(a => a.startsWith('--scenario='))?.split('=')[1] ?? 'negotiation') as any
-    const { runDemo } = await import('./pipeline/demo.js')
-    await runDemo(scenario, { speak: true, verbose: true })
-    process.exit(0)
-  }
 
   setMode(mode)
 
@@ -144,16 +135,43 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`,
     try {
       const transcript = await transcribe(audio)
       if (!transcript) return
+
+      // filter whisper noise tokens
+      if (/^\[.*\]$/.test(transcript.trim())) {
+        console.log(`[SKIP] ${label} — noise token "${transcript}"`)
+        return
+      }
+
       console.log(`[${label}] — "${transcript}"`)
       saveToHistory({ ts: Date.now(), transcript, intent: null, response: null })
 
-      if (ariaActive) { await ariaRespond(transcript); deactivateAria(); return }
+      // active mode — ARIA answers directly
+      if (ariaActive) {
+        await ariaRespond(transcript)
+        deactivateAria()
+        return
+      }
+
       if (inCooldown()) { console.log(`[SKIP] ${label} — cooldown`); return }
 
       const decision = await decide(transcript)
-      if (!decision) return
 
-      if (decision === 'ARIA_QUERY') { activateAria(); await ariaRespond(transcript); deactivateAria(); return }
+      // no decision — check if it was a question, route to ariaRespond
+      if (!decision) {
+        const last = getLastTurn()
+        if (last?.intent === 'QUESTION') {
+          console.log(`[QUESTION] routing to ariaRespond`)
+          await ariaRespond(transcript)
+        }
+        return
+      }
+
+      if (decision === 'ARIA_QUERY') {
+        activateAria()
+        await ariaRespond(transcript)
+        deactivateAria()
+        return
+      }
 
       const enforced = enforceOutput(decision)
       console.log(`[FIRE] "${enforced}"`)

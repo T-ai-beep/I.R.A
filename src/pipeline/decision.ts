@@ -36,6 +36,7 @@ export function setMode(mode: Mode): void {
 export function getMode(): Mode {
   return currentMode
 }
+export { classifyEvent }
 
 function classifyEvent(transcript: string): EventType {
   const t = transcript.toLowerCase()

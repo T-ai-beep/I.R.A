@@ -15,9 +15,17 @@ const EXAMPLES: Example[] = [
   { text: "that's out of our price range", action: "⚠ Price objection — fear signal | hold number" },
   { text: "that's a lot of money for us", action: "⚠ Price objection — fear signal | hold number" },
   { text: "we're tight on budget right now", action: "Budget frozen — timing issue | ask when resets" },
+  { text: "the switching cost would be too high", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "it costs too much to switch systems", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "the valuation seems high for this stage", action: "⚠ Price objection — fear signal | hold number" },
+
+  // discount
   { text: "can you do anything on the price", action: "⚠ Discount asked — frame breaking | reject, add value" },
   { text: "is there any flexibility there", action: "⚠ Discount asked — frame breaking | reject, add value" },
   { text: "can we get a discount", action: "⚠ Discount asked — frame breaking | reject, add value" },
+  { text: "what if we came in at a lower number and you gave us more equity", action: "⚠ Discount asked — frame breaking | reject, add value" },
+  { text: "could you come in lower on the valuation", action: "⚠ Discount asked — frame breaking | reject, add value" },
+  { text: "can you give us a better deal", action: "⚠ Discount asked — frame breaking | reject, add value" },
 
   // stalling
   { text: "let me think about it", action: "They stalled — buying time | wait silent" },
@@ -25,6 +33,7 @@ const EXAMPLES: Example[] = [
   { text: "i'll get back to you", action: "Stall signal — momentum dying | ask what stops you" },
   { text: "we're not ready to move forward yet", action: "Timing deflection — avoiding decision | ask what changes" },
   { text: "maybe next quarter", action: "Timing deflection — avoiding decision | ask what changes" },
+  { text: "we'll see i need more time", action: "They stalled — buying time | wait silent" },
 
   // authority
   { text: "i need to check with my team", action: "Approval needed — not decision maker | ask who" },
@@ -32,18 +41,32 @@ const EXAMPLES: Example[] = [
   { text: "i can't make this decision alone", action: "Approval needed — not decision maker | ask who" },
   { text: "let me run it by our CFO", action: "Approval needed — not decision maker | ask who" },
   { text: "i have to go over it with my manager", action: "Approval needed — not decision maker | ask who" },
+  { text: "i need to check with my business partner", action: "Approval needed — not decision maker | ask who" },
+  { text: "we need to run this by our partners", action: "Approval needed — not decision maker | ask who" },
 
   // competitor
   { text: "we already use servicetitan", action: "Competitor mentioned — pain unaddressed | find the gap" },
   { text: "we have a system in place", action: "Competitor mentioned — pain unaddressed | find the gap" },
   { text: "we're happy with our current solution", action: "Competitor lock-in — switching cost fear | surface the gap" },
   { text: "we use another platform for that", action: "Competitor mentioned — pain unaddressed | find the gap" },
+  { text: "we've been using servicetitan for three years", action: "Competitor mentioned — pain unaddressed | find the gap" },
 
   // agreement signals
   { text: "that sounds really good", action: "⚠ Agreement signal — deal closing | confirm terms now" },
   { text: "i think we're interested", action: "⚠ Agreement signal — deal closing | push to close" },
   { text: "we'd like to move forward", action: "⚠ Agreement signal — deal closing | confirm terms now" },
   { text: "i think we can make this work", action: "⚠ Agreement signal — deal closing | push to close" },
+  { text: "okay let's move forward send me the contract", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "let's do it send me the contract", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "we're ready to move forward", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "can we close this week", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "when can we get started", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "we want to move fast on this", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+
+  // info request
+  { text: "send me the pricing details and i'll take a look", action: "Info request — stall tactic | send, set deadline" },
+  { text: "can you send over the details", action: "Info request — stall tactic | send, set deadline" },
+  { text: "email me the information", action: "Info request — stall tactic | send, set deadline" },
 
   // seller rambling
   { text: "and also we have this feature and that feature and you can do this and that", action: "Rambling detected — losing frame | stop, ask question" },
@@ -59,19 +82,23 @@ const EXAMPLES: Example[] = [
   { text: "what would you say is your biggest weakness", action: "Trap question — reframe risk | lead with growth" },
   { text: "what are your salary expectations", action: "⚠ Comp question — anchor risk | flip to their range" },
   { text: "tell me about yourself", action: "Open framing — first impression | lead with impact" },
+  { text: "give me an example of a time you failed", action: "Example needed — vague answer loses | use STAR format" },
+  { text: "describe a situation where you had to deal with conflict", action: "Example needed — vague answer loses | use STAR format" },
 
   // social
   { text: "so what do you do", action: "Opportunity window — closing fast | anchor your work" },
+  { text: "what are you working on right now", action: "Opportunity window — closing fast | anchor your work" },
   { text: "i just feel like nobody really gets it", action: "Oversharing detected — value dropping | stop talking" },
+  { text: "i really feel like the market isn't ready for this", action: "Oversharing detected — value dropping | stop talking" },
   { text: "i'm an investor looking at early stage", action: "Investor detected — high leverage | engage directly" },
   { text: "we run a fund focused on B2B", action: "Investor detected — high leverage | engage directly" },
 
-  // brutal honesty — self-detection
+  // weak answers
   { text: "well i mean it depends i guess maybe we could", action: "⚠ Weak answer — value unclear | restate with confidence" },
   { text: "i don't know it could be a lot of things", action: "⚠ Weak answer — value unclear | restate with confidence" },
   { text: "sure we can probably do something", action: "⚠ Conceding — frame collapsing | hold position" },
 
-  // meta questions to ARIA — active mode triggers
+  // ARIA meta queries
   { text: "what should I say right now", action: "ARIA_QUERY" },
   { text: "what do I do here", action: "ARIA_QUERY" },
   { text: "help me respond", action: "ARIA_QUERY" },
@@ -79,6 +106,9 @@ const EXAMPLES: Example[] = [
   { text: "what did they say", action: "ARIA_QUERY" },
   { text: "give me a suggestion", action: "ARIA_QUERY" },
   { text: "what should I do", action: "ARIA_QUERY" },
+  { text: "who is Nathan", action: "ARIA_QUERY" },
+  { text: "what is TTC", action: "ARIA_QUERY" },
+  { text: "what are my goals", action: "ARIA_QUERY" },
 ]
 
 async function embed(text: string): Promise<number[]> {
@@ -115,7 +145,7 @@ export async function warmupEmbeddings(): Promise<void> {
 
 export async function matchEmbedding(
   transcript: string,
-  threshold = 0.72
+  threshold = 0.65
 ): Promise<{ action: string; score: number } | null> {
   if (!warmedUp) await warmupEmbeddings()
 

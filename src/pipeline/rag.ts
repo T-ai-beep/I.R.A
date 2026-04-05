@@ -100,7 +100,7 @@ export async function searchKB(query: string, topK = 3): Promise<KBChunk[]> {
     .map(c => ({ chunk: c, score: cosine(qEmbed, c.embedding!) }))
     .sort((a, b) => b.score - a.score)
     .slice(0, topK)
-    .filter(r => r.score > 0.5)
+    .filter(r => r.score > 0.65)
     .map(r => r.chunk)
 }
 

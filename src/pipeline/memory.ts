@@ -1,4 +1,4 @@
-const MEMORY_TTL_MS = 30000
+const MEMORY_TTL_MS = 600_000  // 10 min
 const MAX_TURNS = 20
 
 export interface Turn {
@@ -24,7 +24,6 @@ const state: MemoryState = {
 }
 
 function extractOffer(transcript: string): number | null {
-  // requires $ sign or explicit price unit — avoids catching random numbers
   const match = transcript.match(/\$\s*([\d,]+)(\s*(k|thousand|million))?/i)
     ?? transcript.match(/\b([\d,]+)\s*(k|thousand|million)?\s*(a month|per month|monthly|a year|annually)\b/i)
 
@@ -86,6 +85,11 @@ export function remember(transcript: string): Turn {
   console.log(`[MEM] intent=${turn.intent ?? 'none'} offer=${turn.offer ?? 'none'} speaker=${turn.speaker}`)
 
   return turn
+}
+
+export function getLastTurn(): Turn | null {
+  purgeExpired()
+  return state.turns[state.turns.length - 1] ?? null
 }
 
 export function getContext(): MemoryState {
