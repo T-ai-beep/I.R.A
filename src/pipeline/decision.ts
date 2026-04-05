@@ -27,6 +27,9 @@ export type EventType =
   | 'DEADLINE'
   | 'UNKNOWN'
 
+// ── Mode state — strictly isolated ────────────────────────────────────────
+// Mode changes take effect IMMEDIATELY on the next decide() call.
+
 let currentMode: Mode = 'negotiation'
 
 export function setMode(mode: Mode): void {
@@ -40,18 +43,63 @@ export function getMode(): Mode {
 
 export { classifyEvent }
 
+// ── Event classification — handles adversarial phrasing ──────────────────
+
 function classifyEvent(transcript: string): EventType {
   const t = transcript.toLowerCase()
-  if (/can't afford|too expensive|too much|no budget|price is|can't spend|fifteen hundred.*too|upfront is.*too/.test(t)) return 'PRICE_OBJECTION'
-  if (/need to think|get back|not sure|maybe|not ready/.test(t)) return 'STALLING'
-  if (/check with|my team|my boss|need approval|not my call|run it by|my wife|my husband/.test(t)) return 'AUTHORITY'
-  if (/already use|currently use|we have|service.?titan|competitor|went with|signed with|chose.*instead/.test(t)) return 'COMPETITOR'
-  if (/sounds good|we're in|let's do it|i'll take it|deal|move forward|i'm in/.test(t)) return 'AGREEMENT'
+
+  // PRICE_OBJECTION — includes implied signals
+  if (
+    /can't afford|too expensive|too much|no budget|price is|can't spend/i.test(t) ||
+    /fifteen hundred.*too|upfront.*too|valuation.*high|switching cost/i.test(t) ||
+    /that is a lot\b|that's a lot\b|a lot for.*company|a lot for.*(size|operation)/i.test(t) ||
+    /was not expecting that number|sticker shock|feels like a stretch/i.test(t) ||
+    /not sure.*get that value|not sure.*would get.*value/i.test(t) ||
+    /fifteen hundred bucks is a lot|lot for us man|feels like too much/i.test(t)
+  ) return 'PRICE_OBJECTION'
+
+  // AUTHORITY — includes adversarial phrasing
+  if (
+    /check with|my team|my boss|need approval|not my call|run it by/i.test(t) ||
+    /my wife|my husband|my business partner|she handles|he handles/i.test(t) ||
+    /partner.*weigh in|our team would need to align|team.*align on/i.test(t)
+  ) return 'AUTHORITY'
+
+  // COMPETITOR — includes "signed with them" adversarial
+  if (
+    /already use|currently use|we have|service.?titan|jobber|housecall/i.test(t) ||
+    /competitor|went with|signed with|chose.*instead/i.test(t) ||
+    /signed the paperwork with them|already signed with/i.test(t) ||
+    /happy with.*current/i.test(t)
+  ) return 'COMPETITOR'
+
+  // AGREEMENT — includes adversarial soft confirms
+  if (
+    /sounds good|we're in|let's do it|i'll take it|deal|move forward/i.test(t) ||
+    /i'm in\b|when do we start|ready to sign|close this week/i.test(t) ||
+    /could really work for us|this could really work/i.test(t) ||
+    /yeah.*i am in|alright.*let's.*do this/i.test(t)
+  ) return 'AGREEMENT'
+
+  // STALLING — includes adversarial "circle back"
+  if (
+    /need to think|get back|not sure|maybe|not ready/i.test(t) ||
+    /circle back|be in touch|will be in touch/i.test(t) ||
+    /sounds interesting.*we will|this is interesting.*we will/i.test(t)
+  ) return 'STALLING'
+
   if (/\?$/.test(t.trim())) return 'QUESTION'
-  if (/\$|per month|a year|pricing|cost|budget|range of/.test(t)) return 'OFFER_DISCUSS'
-  if (/deadline|by friday|by monday|end of week|next week|asap/.test(t)) return 'DEADLINE'
+
+  if (
+    /\$|per month|a year|annually|pricing|cost|budget|range of|salary|compensation/i.test(t)
+  ) return 'OFFER_DISCUSS'
+
+  if (/deadline|by friday|by monday|end of week|next week|asap/i.test(t)) return 'DEADLINE'
+
   return 'UNKNOWN'
 }
+
+// ── High-impact events — LLM is allowed ──────────────────────────────────
 
 const HIGH_IMPACT: EventType[] = [
   'PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS',
@@ -124,7 +172,7 @@ async function llmFallback(
   }
 }
 
-// ── Side effects ──────────────────────────────────────────────────────────
+// ── Non-blocking side effects ─────────────────────────────────────────────
 
 function processSideEffects(
   transcript: string,
@@ -161,65 +209,79 @@ function processSideEffects(
 }
 
 // ── Main decide ───────────────────────────────────────────────────────────
+// Returns:
+//   string  = the action/response to speak
+//   null    = no action (pass through)
+//   "ARIA_QUERY" = route to ariaRespond active mode
 
 export async function decide(transcript: string): Promise<string | null> {
   const t0       = Date.now()
   const deadline = t0 + CONFIG.LATENCY_BUDGET_MS
 
-  // memory
-  const turn  = remember(transcript)
-  const event = classifyEvent(transcript)
-  console.log(`[EVENT] ${event}`)
+  // 1. Memory — snapshot the mode at call time to prevent mid-call drift
+  const modeAtCall = currentMode
+  const turn       = remember(transcript)
+  const event      = classifyEvent(transcript)
+  console.log(`[EVENT] ${event} [MODE] ${modeAtCall}`)
 
   const person = turn.speaker !== 'unknown'
     ? null
     : transcript.match(/([A-Z][a-z]{1,14})/)?.[1] ?? null
 
-  // side effects (non-blocking)
+  // Side effects — non-blocking
   processSideEffects(transcript, turn.intent, turn.offer, person)
 
-  // ── steering ──────────────────────────────────────────────────────────
+  // ── Steering (non-blocking, fast path) ───────────────────────────────
   const steering = await steer(transcript, false)
   if (steering.preloadMessage) {
     console.log(`[STEER] preload → "${steering.preloadMessage}"`)
   }
 
-  // ── collect candidates ────────────────────────────────────────────────
+  // ── Collect candidates ────────────────────────────────────────────────
   const candidates: ActionCandidate[] = []
 
-  // 0. PLAYBOOK — zero latency, precomputed executable responses
-  //    Runs before rules/embeddings/LLM so it always contributes a candidate
-  //    mustRespond plays score 0.95 — beat embeddings, lose to rules
-  const play = matchPlaybook(transcript)
-  if (play) {
-    const playbookResponse = executePlay(play)
-    const playbookScore    = play.mustRespond ? 0.95 : 0.70
-    candidates.push({
-      command: 'WAIT',
-      message: playbookResponse,
-      source:  'rule',
-      score:   playbookScore,
-    })
-    console.log(`[PLAY] ${play.key} score=${playbookScore} — "${playbookResponse}"`)
+  // 0. PLAYBOOK — only runs in negotiation mode (social/meeting/interview use rules)
+  //    mustRespond plays score 0.95 — beat embeddings, yield to rules
+  let play = null
+  if (modeAtCall === 'negotiation') {
+    play = matchPlaybook(transcript)
+    if (play) {
+      const playbookResponse = executePlay(play)
+      const playbookScore    = play.mustRespond ? 0.95 : 0.70
+      candidates.push({
+        command: 'WAIT',
+        message: playbookResponse,
+        source:  'rule',
+        score:   playbookScore,
+      })
+      console.log(`[PLAY] ${play.key} score=${playbookScore} — "${playbookResponse}"`)
+    }
   }
 
-  // 1. Rule engine (0ms)
-  const ruleHit = matchRule(transcript, currentMode)
+  // 1. Rule engine — uses CURRENT mode (mode isolation enforced here)
+  const ruleHit = matchRule(transcript, modeAtCall)
   if (ruleHit) {
     candidates.push({ command: 'WAIT', message: ruleHit, source: 'rule', score: 1.0 })
     console.log(`[RULE] ${Date.now() - t0}ms — "${ruleHit}"`)
   }
 
-  // 2. Embedding (~5ms)
+  // 2. Embedding (~5ms) — mode-agnostic semantic match
   if (Date.now() < deadline - 10) {
     const embedMatch = await matchEmbedding(transcript)
     if (embedMatch) {
-      candidates.push({ command: 'WAIT', message: embedMatch.action, source: 'embedding', score: embedMatch.score })
-      console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
+      // In non-negotiation modes, filter out negotiation-specific embedding labels
+      // to prevent mode bleed (e.g. "hold number" firing in meeting mode)
+      const isNegotiationLabel = /hold number|frame breaking|fear signal|pain unaddressed|deal closing/i.test(embedMatch.action)
+      if (modeAtCall === 'negotiation' || !isNegotiationLabel) {
+        candidates.push({ command: 'WAIT', message: embedMatch.action, source: 'embedding', score: embedMatch.score })
+        console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
+      } else {
+        console.log(`[EMBED] ${Date.now() - t0}ms — suppressed negotiation label in ${modeAtCall} mode`)
+      }
     }
   }
 
-  // 3. LLM — only high impact events with time budget
+  // 3. LLM — only for high-impact events with remaining budget
   if (isHighImpact(event) && Date.now() < deadline - 200) {
     const llmResult = await llmFallback(transcript, event, deadline)
     if (llmResult) {
@@ -232,10 +294,10 @@ export async function decide(transcript: string): Promise<string | null> {
     }
   }
 
-  // ── FORCED RESPONSE — certain events can NEVER return null ────────────
-  //    If we still have no candidates and this is a money/closing moment,
-  //    fire the precomputed fallback. No silent moments on critical signals.
-  if (!candidates.length && FORCED_RESPONSE_EVENTS.has(event)) {
+  // ── FORCED RESPONSE ───────────────────────────────────────────────────
+  // Certain events CANNOT return null in negotiation mode.
+  // If we still have no candidates, fire the precomputed fallback.
+  if (!candidates.length && modeAtCall === 'negotiation' && FORCED_RESPONSE_EVENTS.has(event)) {
     const fallback = getForcedFallback(event)
     if (fallback) {
       console.log(`[FORCED] ${event} — no candidates, firing fallback`)
@@ -248,21 +310,23 @@ export async function decide(transcript: string): Promise<string | null> {
     return null
   }
 
-  // ── select best ───────────────────────────────────────────────────────
+  // ── Select best action ────────────────────────────────────────────────
   const best: BestAction | null = selectBestAction(candidates, event)
   if (!best) return null
 
   // ── mustRespond override ──────────────────────────────────────────────
-  // If playbook says mustRespond but scoring picked a lower-value observational
-  // label (e.g. "⚠ Price objection — fear signal"), override with the
-  // playbook's executable response instead.
+  // If playbook says mustRespond but scoring picked an observational label
+  // (⚠ prefix or "fear signal"), override with the playbook's executable response.
   if (play?.mustRespond) {
     const playbookCandidate = candidates.find(c => c.score === 0.95)
-    const isObservationalLabel = best.message.startsWith('⚠') || best.message.includes('fear signal') || best.message.includes('frame breaking') || best.message.includes('pain unaddressed')
+    const isObservationalLabel = (
+      best.message.startsWith('⚠') ||
+      /fear signal|frame breaking|pain unaddressed|buying time/i.test(best.message)
+    )
     if (playbookCandidate && isObservationalLabel) {
-      console.log(`[EXEC] mustRespond override — swapping label for executable response`)
+      console.log(`[EXEC] mustRespond override — swapping observational label for executable response`)
       const execMessage = playbookCandidate.message
-      logDecision(transcript, event, execMessage, 'rule', currentMode, person, turn.offer)
+      logDecision(transcript, event, execMessage, 'rule', modeAtCall, person, turn.offer)
       console.log(`[DECIDE] ${Date.now() - t0}ms — "${execMessage}" [playbook override]`)
       return execMessage
     }
@@ -276,7 +340,7 @@ export async function decide(transcript: string): Promise<string | null> {
     console.log(`[IDENTITY] ${highImportance[0].urgencyLabel}`)
   }
 
-  logDecision(transcript, event, best.message, best.source, currentMode, person, turn.offer)
+  logDecision(transcript, event, best.message, best.source, modeAtCall, person, turn.offer)
 
   return best.message
 }

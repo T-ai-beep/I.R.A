@@ -23,34 +23,88 @@ const state: MemoryState = {
   lastSpeaker: 'unknown',
 }
 
-function extractOffer(transcript: string): number | null {
-  const match = transcript.match(/\$\s*([\d,]+)(\s*(k|thousand|million))?/i)
-    ?? transcript.match(/\b([\d,]+)\s*(k|thousand|million)?\s*(a month|per month|monthly|a year|annually)\b/i)
+// ── Offer extraction — handles all formats ─────────────────────────────────
+// Formats handled:
+//   $5,000 / $5000 / $5k / 5 thousand / 5k / $1.5 million
+//   $150 per month / 150 a month / 5,000 monthly
+// Excluded:
+//   "15 employees" / "15 years" / "40 percent" (context guards)
 
-  if (!match) return null
-
-  const raw = match[1].replace(/,/g, '')
-  const val = parseFloat(raw)
-  if (isNaN(val)) return null
-
-  const unit = (match[3] ?? match[2] ?? '').toLowerCase()
-  if (unit === 'k' || unit === 'thousand') return val * 1000
-  if (unit === 'million') return val * 1_000_000
-  return val
-}
-
-function extractIntent(transcript: string): string | null {
+export function extractOffer(transcript: string): number | null {
   const t = transcript.toLowerCase()
-  if (/can't afford|too expensive|too much|no budget|price is/.test(t)) return 'PRICE_OBJECTION'
-  if (/need to think|get back|not sure|maybe/.test(t)) return 'STALLING'
-  if (/check with|my team|my boss|need approval|not my call/.test(t)) return 'AUTHORITY'
-  if (/already use|currently use|we have|service.?titan|competitor/.test(t)) return 'COMPETITOR'
-  if (/let's do it|sounds good|we're in|i'll take it|deal/.test(t)) return 'AGREEMENT'
-  if (/\?$/.test(t.trim())) return 'QUESTION'
-  if (/\$|per month|a year|annually|pricing|cost|budget/.test(t)) return 'OFFER_DISCUSS'
-  if (/deadline|by (friday|monday|end of|next week)/.test(t)) return 'DEADLINE'
+
+  // Guard: skip if the number is clearly NOT a price
+  // "15 years", "15 employees", "40 percent" etc.
+  const nonPriceCtx = /\d+\s*(years?|employees?|people|percent|%|members?|times?|days?|hours?|weeks?|months? ago|years? ago)/i
+  if (nonPriceCtx.test(transcript) && !/\$|per month|monthly|annually|a year|pricing|cost|budget|afford|salary|range/i.test(t)) {
+    return null
+  }
+
+  // Pattern 1: $X[.Y][k|thousand|million] [optional: per month/monthly/etc]
+  const dollarPat = /\$\s*([\d,]+(?:\.\d+)?)\s*(k|thousand|million|m\b)?/i
+  const dollarMatch = transcript.match(dollarPat)
+  if (dollarMatch) {
+    const raw = parseFloat(dollarMatch[1].replace(/,/g, ''))
+    if (!isNaN(raw)) {
+      const unit = (dollarMatch[2] ?? '').toLowerCase()
+      if (unit === 'k' || unit === 'thousand') return raw * 1_000
+      if (unit === 'million' || unit === 'm') return raw * 1_000_000
+      return raw
+    }
+  }
+
+  // Pattern 2: X[.Y] k/thousand/million [per month/annually/etc or price context]
+  const wordPat = /\b([\d,]+(?:\.\d+)?)\s*(k|thousand|million)\b/i
+  const wordMatch = transcript.match(wordPat)
+  if (wordMatch) {
+    // Only if there's price context
+    if (/per month|monthly|a month|a year|annually|salary|wage|price|cost|budget|afford|range|expecting|valuation/i.test(t)) {
+      const raw = parseFloat(wordMatch[1].replace(/,/g, ''))
+      if (!isNaN(raw)) {
+        const unit = wordMatch[2].toLowerCase()
+        if (unit === 'k' || unit === 'thousand') return raw * 1_000
+        if (unit === 'million') return raw * 1_000_000
+      }
+    }
+  }
+
+  // Pattern 3: plain number with per-month / annually context
+  const plainPat = /\b([\d,]+(?:\.\d+)?)\s*(?:a month|per month|monthly|a year|per year|annually)\b/i
+  const plainMatch = transcript.match(plainPat)
+  if (plainMatch) {
+    const raw = parseFloat(plainMatch[1].replace(/,/g, ''))
+    if (!isNaN(raw) && raw >= 10) return raw  // skip tiny numbers like "1 a month"
+  }
+
+  // Pattern 4: salary/range context with bare number
+  const rangePat = /(?:range of|expecting|between)\s*\$?\s*([\d,]+)/i
+  const rangeMatch = transcript.match(rangePat)
+  if (rangeMatch) {
+    const raw = parseFloat(rangeMatch[1].replace(/,/g, ''))
+    if (!isNaN(raw)) return raw
+  }
+
   return null
 }
+
+// ── Intent extraction ──────────────────────────────────────────────────────
+
+export function extractIntent(transcript: string): string | null {
+  const t = transcript.toLowerCase()
+
+  // Order matters — check most specific first
+  if (/can't afford|too expensive|too much|no budget|price is|can't spend|fifteen hundred.*too|upfront.*too|valuation.*high|switching cost|sticker shock|not sure.*value|not get.*value/.test(t)) return 'PRICE_OBJECTION'
+  if (/need to think|get back|not sure|maybe|not ready|circle back|be in touch|let us know/.test(t)) return 'STALLING'
+  if (/check with|my team|my boss|need approval|not my call|run it by|my wife|my husband|my partner|she handles|he handles/.test(t)) return 'AUTHORITY'
+  if (/already use|currently use|we have|service.?titan|jobber|housecall|competitor|signed with|went with|chose.*instead/.test(t)) return 'COMPETITOR'
+  if (/let's do it|sounds good|we're in|i'll take it|deal|move forward|i'm in|ready to sign|when do we start|could really work|get started/.test(t)) return 'AGREEMENT'
+  if (/\?$/.test(t.trim())) return 'QUESTION'
+  if (/\$|per month|a year|annually|pricing|cost|budget|range of|salary|compensation/.test(t)) return 'OFFER_DISCUSS'
+  if (/deadline|by friday|by monday|end of week|next week|asap/.test(t)) return 'DEADLINE'
+  return null
+}
+
+// ── Speaker extraction ─────────────────────────────────────────────────────
 
 function extractSpeaker(transcript: string): Turn['speaker'] {
   const t = transcript.toLowerCase()

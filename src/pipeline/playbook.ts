@@ -1,17 +1,18 @@
 /**
  * playbook.ts
- * Execution engine. Not a script library — a pressure system.
+ * Execution engine. Pressure system with 4-tier escalation per play.
  *
- * Architecture:
- *   Each play has 4 escalation tiers, not flat variants.
- *   Tier 0 = probe     — soft, open
- *   Tier 1 = isolate   — narrow the objection
- *   Tier 2 = pressure  — remove exits
- *   Tier 3 = corner    — binary, commit or walk
+ * Tier 0 = probe     — soft, open question
+ * Tier 1 = isolate   — narrow the objection
+ * Tier 2 = pressure  — remove exits
+ * Tier 3 = corner    — binary, commit or walk
  *
- *   Silence is a weapon. [SILENCE] marker = stop talking after delivering.
- *   Timeline plays control urgency independently of objection plays.
- *   Every play logs tier + key for instrumentation.
+ * Key invariants:
+ *   - Tier state is ISOLATED per play key (firing stall doesn't advance price)
+ *   - Tier 0 ALWAYS ends with a question mark (probe = soft/open)
+ *   - Tier 3 ALWAYS has binary=true (corners the prospect)
+ *   - FORCED_RESPONSE_EVENTS never return null
+ *   - resetTiers() restores ALL play states to tier 0
  */
 
 import * as fs from 'fs'
@@ -81,21 +82,26 @@ function logPlayFire(fire: PlayFire) {
 }
 
 // ── Escalation tier tracking ───────────────────────────────────────────────
-// Tracks how many times each play has fired in this session.
-// More fires = higher tier = more pressure.
+// CRITICAL: Each play has its OWN isolated fire counter.
+// Firing STALL_GENERIC 3x does NOT advance PRICE_OBJECTION tier.
 
-const tierState: Partial<Record<PlaybookKey, number>> = {}
+const tierState: Map<PlaybookKey, number> = new Map()
 
 export function getNextTier(key: PlaybookKey): EscalationTier {
-  const current = tierState[key] ?? 0
-  tierState[key] = current + 1
+  const current = tierState.get(key) ?? 0
+  tierState.set(key, current + 1)
+  // Cap at 3 — stays at tier 3 (FORCED corner) until reset
   return Math.min(current, 3) as EscalationTier
 }
 
 export function resetTiers(): void {
-  for (const key of Object.keys(tierState) as PlaybookKey[]) {
-    delete tierState[key]
-  }
+  tierState.clear()
+}
+
+export function getTierState(): Record<string, number> {
+  const out: Record<string, number> = {}
+  tierState.forEach((v, k) => { out[k] = v })
+  return out
 }
 
 // ── The Playbook ──────────────────────────────────────────────────────────
@@ -111,6 +117,7 @@ export const PLAYBOOK: Record<PlaybookKey, Play> = {
       {
         tier: 0,
         label: 'probe',
+        // Tier 0 MUST end with "?" — it's a soft open probe
         response: 'What part of the price concerns you most — the total or the monthly?',
         silence: true,
         binary: false,
@@ -584,8 +591,7 @@ export const PLAYBOOK: Record<PlaybookKey, Play> = {
   },
 }
 
-// ── Timeline control plays (independent of objection type) ────────────────
-// These fire as augmentation when urgency needs to be injected.
+// ── Timeline control plays ────────────────────────────────────────────────
 
 export interface TimelinePlay {
   key: string
@@ -627,7 +633,7 @@ export const TIMELINE_PLAYS: TimelinePlay[] = [
   },
 ]
 
-// ── Signal detection ──────────────────────────────────────────────────────
+// ── Signal detection — sorted by priority descending ─────────────────────
 
 interface PlaybookSignal {
   pattern: RegExp
@@ -636,38 +642,39 @@ interface PlaybookSignal {
 }
 
 const SIGNALS: PlaybookSignal[] = [
-  // Closing — highest priority
-  { pattern: /let's do it|send me the contract|we're ready|we're in|i'll take it|i'm in|when do we start|move forward/i,                       key: 'AGREEMENT_SIGNAL',   priority: 12 },
-  { pattern: /already signed|signed with them|went with|decided.*instead|chose.*over you/i,                                                      key: 'PANIC_LOSING',       priority: 12 },
+  // Closing / panic — highest priority
+  { pattern: /let's do it|send me the contract|we're ready|we're in|i'll take it|i'm in\b|when do we start|move forward|could really work for us|yeah.*i am in|ready to sign|close this week/i,   key: 'AGREEMENT_SIGNAL',   priority: 12 },
+  { pattern: /already signed|signed with them|went with|decided.*instead|chose.*over you|decided to go with.*instead/i,                                                                             key: 'PANIC_LOSING',       priority: 12 },
 
-  // Money
-  { pattern: /too expensive|can't afford|too much|out of budget|not worth|switching cost|fifteen hundred.*too|upfront.*too|too much for a small/i, key: 'PRICE_OBJECTION',    priority: 11 },
-  { pattern: /discount|lower the price|any flexibility|can you do better|trial period|lower upfront|work with us on the price|come in lower/i,    key: 'DISCOUNT_REQUEST',   priority: 11 },
-  { pattern: /looking for.*range|in the range of|\$[\d,]+k? to \$[\d,]+k?|salary expectations|expecting.*\$[\d,]+/i,                             key: 'COMP_ANCHOR',        priority: 11 },
+  // Money — second highest
+  { pattern: /too expensive|can't afford|too much|out of budget|not worth|switching cost|fifteen hundred.*too|upfront.*too|too much for a small|that is a lot\b|that's a lot\b|a lot for.*company|a lot for.*size|was not expecting that number|sticker shock|feels like a stretch|a stretch for.*budget|not sure.*get that value|fifteen hundred bucks is a lot|lot for us man|feels like too much/i,   key: 'PRICE_OBJECTION',    priority: 11 },
+  { pattern: /discount|lower the price|any flexibility|can you do better|trial period|lower upfront|work with us on the price|come in lower|wiggle room|any chance.*wiggle|come down at all/i,     key: 'DISCOUNT_REQUEST',   priority: 11 },
+  { pattern: /looking for.*range|in the range of|\$[\d,]+k? to \$[\d,]+k?|salary expectations|expecting.*\$[\d,]+|something in the range/i,                                                       key: 'COMP_ANCHOR',        priority: 11 },
 
   // Competitor / manual
-  { pattern: /track.*manually|do it manually|works fine.*manual|we track everything manually|pen and paper|spreadsheet for that/i,                key: 'MANUAL_TRACKING',    priority: 10 },
-  { pattern: /happy with.*current|been using.*\d+ years|already (use|have)|service.?titan|jobber|went with|signed with|chose.*instead/i,         key: 'COMPETITOR_LOCKIN',  priority: 10 },
+  { pattern: /track.*manually|do it manually|works fine.*manual|we track everything manually|pen and paper|spreadsheet for that/i,                                                                  key: 'MANUAL_TRACKING',    priority: 10 },
+  { pattern: /happy with.*current|been using.*\d+ years|already (use|have)|service.?titan|jobber|went with|signed with|chose.*instead|signed the paperwork with them/i,                           key: 'COMPETITOR_LOCKIN',  priority: 10 },
 
   // Authority
-  { pattern: /talk to my (wife|husband|spouse)|she handles|he handles|my (wife|husband) (handles|manages)/i,                                     key: 'AUTHORITY_BLOCK',    priority: 10 },
-  { pattern: /check with my (team|boss|manager|ceo|cfo|partner|business partner)|need approval|not my (call|decision)|run it by/i,               key: 'AUTHORITY_BLOCK',    priority: 10 },
+  { pattern: /talk to my (wife|husband|spouse)|she handles|he handles|my (wife|husband) (handles|manages)/i,                                                                                       key: 'AUTHORITY_BLOCK',    priority: 10 },
+  { pattern: /check with my (team|boss|manager|ceo|cfo|partner|business partner)|need approval|not my (call|decision)|run it by|my business partner would need|partner.*weigh in|our team would need to align/i,   key: 'AUTHORITY_BLOCK',    priority: 10 },
 
   // Budget / timing
-  { pattern: /budget is (frozen|gone|tight|limited)|no budget|budget.*doesn't allow|when budget resets/i,                                        key: 'BUDGET_FROZEN',      priority: 10 },
-  { pattern: /next (quarter|year|month)|not right now|bad timing|reconnect next/i,                                                               key: 'TIMING_DEFLECTION',  priority: 9  },
+  { pattern: /budget is (frozen|gone|tight|limited)|no budget|budget.*doesn't allow|when budget resets|budget is tight/i,                                                                           key: 'BUDGET_FROZEN',      priority: 10 },
+  { pattern: /next (quarter|year|month)|not right now|bad timing|reconnect next/i,                                                                                                                  key: 'TIMING_DEFLECTION',  priority: 9  },
 
   // Info / stall
-  { pattern: /send me (more )?info|send.*details|email me|can you send|more information about what you offer/i,                                   key: 'INFO_REQUEST',       priority: 9  },
-  { pattern: /need to think|think about it|get back to you|not (sure|ready)|let me consider|another offer/i,                                     key: 'STALL_GENERIC',      priority: 8  },
+  { pattern: /send me (more )?info|send.*details|email me|can you send|more information about what you offer|send me more/i,                                                                        key: 'INFO_REQUEST',       priority: 9  },
+  { pattern: /need to think|think about it|get back to you|not (sure|ready)|let me consider|another offer|circle back|be in touch/i,                                                               key: 'STALL_GENERIC',      priority: 8  },
 
-  // Weak
-  { pattern: /i don't know|i guess|kind of|sort of|it depends|not really sure/i,                                                                 key: 'WEAK_ANSWER',        priority: 6  },
+  // Weak answer
+  { pattern: /i don't know|i guess|kind of|sort of|it depends|not really sure/i,                                                                                                                   key: 'WEAK_ANSWER',        priority: 6  },
 ]
 
 // ── Match transcript to play ──────────────────────────────────────────────
 
 export function matchPlaybook(transcript: string): Play | null {
+  // Sort by priority descending — highest wins
   const sorted = [...SIGNALS].sort((a, b) => b.priority - a.priority)
   for (const signal of sorted) {
     if (signal.pattern.test(transcript)) {
@@ -708,7 +715,7 @@ export function matchTimelinePlay(transcript: string): TimelinePlay | null {
   return null
 }
 
-// ── Forced response events — PASS not allowed ─────────────────────────────
+// ── Forced response events — null never allowed ───────────────────────────
 
 export const FORCED_RESPONSE_EVENTS: Set<EventType> = new Set([
   'PRICE_OBJECTION',
@@ -734,7 +741,7 @@ export function getForcedFallback(event: EventType): string | null {
   return FORCED_FALLBACKS[event] ?? null
 }
 
-// ── Playbook analytics — which plays fire, which convert ─────────────────
+// ── Playbook analytics ────────────────────────────────────────────────────
 
 export function getPlayStats(): Record<string, { fires: number; tiers: number[] }> {
   if (!fs.existsSync(PLAYS_FILE)) return {}
