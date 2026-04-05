@@ -1,9 +1,3 @@
-/**
- * identityScore.ts
- * Ranks known people by importance.
- * Drives ARIA urgency: investor → respond now vs random → low priority.
- */
-
 import { PersonRecord, getAllPeople, lookupPerson } from './people.js'
 
 export type ImportanceLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
@@ -11,73 +5,59 @@ export type ImportanceLevel = 'CRITICAL' | 'HIGH' | 'MEDIUM' | 'LOW'
 export interface IdentityScore {
   name: string
   displayName: string
-  score: number             // 0–1
+  score: number
   level: ImportanceLevel
-  reason: string            // e.g. "investor, 3 mentions, last offer $5000"
-  urgencyLabel: string      // spoken by ARIA: "Investor — respond now"
+  reason: string
+  urgencyLabel: string
 }
 
-// ── Tag weights ────────────────────────────────────────────────────────────
-
-const TAG_WEIGHTS: Record<string, number> = {
-  investor:   1.00,
-  client:     0.90,
-  lead:       0.80,
-  partner:    0.70,
-  internal:   0.60,
-  competitor: 0.40,
+// Tag base scores — investor always starts higher than client so
+// even at max mentions/offers they stay ordered
+const TAG_BASE: Record<string, number> = {
+  investor:   0.90,   // was 1.00 — leave headroom for bonuses
+  client:     0.78,   // was 0.90
+  lead:       0.68,
+  partner:    0.58,
+  internal:   0.48,
+  competitor: 0.30,
 }
 
-const DEFAULT_WEIGHT = 0.20
+const DEFAULT_BASE = 0.18
 
-// ── Score a single person ──────────────────────────────────────────────────
+const MAX_SCORE = 0.99  // hard cap — never reaches 1.0, keeps ordering intact
 
 export function scoreIdentity(record: PersonRecord): IdentityScore {
-  let score = DEFAULT_WEIGHT
+  let score = DEFAULT_BASE
 
-  // tag-based base score (highest tag wins)
-  const tagScores = record.tags
-    .map(t => TAG_WEIGHTS[t] ?? DEFAULT_WEIGHT)
-  if (tagScores.length) {
-    score = Math.max(...tagScores)
-  }
+  const tagScores = record.tags.map(t => TAG_BASE[t] ?? DEFAULT_BASE)
+  if (tagScores.length) score = Math.max(...tagScores)
 
-  // mention multiplier — more interaction = more important (capped)
-  const mentionBonus = Math.min(0.15, record.mentions * 0.01)
+  // mention multiplier — capped tightly so it can't override tag ordering
+  const mentionBonus = Math.min(0.06, record.mentions * 0.005)
   score += mentionBonus
 
-  // offer presence — dealing with money signals real deal
-  if (record.lastOffer !== null) score += 0.10
+  if (record.lastOffer !== null) score += 0.05  // was 0.10
 
-  // recency bonus — seen in last 24h
   const hoursSince = (Date.now() - record.lastSeen) / 3_600_000
-  if (hoursSince < 1)  score += 0.10
-  if (hoursSince < 24) score += 0.05
+  if (hoursSince < 1)  score += 0.04
+  if (hoursSince < 24) score += 0.02
 
-  // intent boost
-  if (record.lastIntent === 'AGREEMENT')      score += 0.15
-  if (record.lastIntent === 'PRICE_OBJECTION') score += 0.05
+  if (record.lastIntent === 'AGREEMENT')       score += 0.08
+  if (record.lastIntent === 'PRICE_OBJECTION') score += 0.03
 
-  score = Math.min(1.0, parseFloat(score.toFixed(3)))
+  score = Math.min(MAX_SCORE, parseFloat(score.toFixed(3)))
 
   const level = scoreToLevel(score)
   const reason = buildReason(record, score)
   const urgencyLabel = buildUrgencyLabel(record, level)
 
-  return {
-    name: record.name,
-    displayName: record.displayName,
-    score,
-    level,
-    reason,
-    urgencyLabel,
-  }
+  return { name: record.name, displayName: record.displayName, score, level, reason, urgencyLabel }
 }
 
 function scoreToLevel(score: number): ImportanceLevel {
-  if (score >= 0.85) return 'CRITICAL'
-  if (score >= 0.65) return 'HIGH'
-  if (score >= 0.40) return 'MEDIUM'
+  if (score >= 0.82) return 'CRITICAL'
+  if (score >= 0.62) return 'HIGH'
+  if (score >= 0.38) return 'MEDIUM'
   return 'LOW'
 }
 
@@ -93,7 +73,6 @@ function buildReason(record: PersonRecord, score: number): string {
 function buildUrgencyLabel(record: PersonRecord, level: ImportanceLevel): string {
   const topTag = record.tags[0] ?? 'contact'
   const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
-
   switch (level) {
     case 'CRITICAL': return `${capitalize(topTag)} — respond now`
     case 'HIGH':     return `${capitalize(topTag)} — prioritize`
@@ -102,23 +81,15 @@ function buildUrgencyLabel(record: PersonRecord, level: ImportanceLevel): string
   }
 }
 
-// ── Lookup score for a person by name ─────────────────────────────────────
-
 export function getIdentityScore(name: string): IdentityScore | null {
   const record = lookupPerson(name)
   if (!record) return null
   return scoreIdentity(record)
 }
 
-// ── Get all scored people, ranked ─────────────────────────────────────────
-
 export function getRankedIdentities(): IdentityScore[] {
-  return getAllPeople()
-    .map(scoreIdentity)
-    .sort((a, b) => b.score - a.score)
+  return getAllPeople().map(scoreIdentity).sort((a, b) => b.score - a.score)
 }
-
-// ── Check if a transcript mentions high-importance people ─────────────────
 
 export function getHighImportancePeople(transcript: string): IdentityScore[] {
   const all = getAllPeople()
@@ -131,8 +102,6 @@ export function getHighImportancePeople(transcript: string): IdentityScore[] {
     .filter(s => s.level === 'CRITICAL' || s.level === 'HIGH')
     .sort((a, b) => b.score - a.score)
 }
-
-// ── Context string for ARIA ────────────────────────────────────────────────
 
 export function getIdentityContext(transcript: string): string {
   const high = getHighImportancePeople(transcript)
