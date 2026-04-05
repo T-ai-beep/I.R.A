@@ -5,7 +5,13 @@ import { remember, getContext } from './memory.js'
 import { extractTaskFromTranscript, addTask, getTaskContext } from './tasks.js'
 import { updatePeopleFromTranscript, getPeopleContext } from './people.js'
 import { detectFollowUp, createFollowUp, getFollowUpContext } from './followup.js'
-import { logDecision, getPatternContext } from "../pipeline/decisionLog.js"
+import { logDecision, getPatternContext } from './decisionLog.js'
+import { selectBestAction, ActionCandidate, BestAction } from './actionSelector.js'
+import { recordSuccess, recordIgnored } from './adaptiveWeights.js'
+import { steer, getTrajectoryContext } from './steering.js'
+import { storeEpisode, getEpisodicContext } from "../pipeline/epsodic.js"
+import { getIdentityContext, getHighImportancePeople } from './identityScore.js'
+import { createPressureItem } from './pressure.js'
 
 export type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -44,8 +50,9 @@ function classifyEvent(transcript: string): EventType {
   return 'UNKNOWN'
 }
 
-// QUESTION added — so "who is X", "what should I say" etc. reach LLM fallback
-const HIGH_IMPACT: EventType[] = ['PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS']
+const HIGH_IMPACT: EventType[] = [
+  'PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS'
+]
 
 function isHighImpact(event: EventType): boolean {
   return HIGH_IMPACT.includes(event)
@@ -58,106 +65,200 @@ phrase is 2 words max.
 If nothing actionable: PASS
 No explanation. No punctuation. No quotes.`
 
-async function llmFallback(transcript: string, event: EventType): Promise<string | null> {
+// ── LLM fallback — with hard latency cap ─────────────────────────────────
+
+async function llmFallback(
+  transcript: string,
+  event: EventType,
+  deadline: number
+): Promise<string | null> {
   const ctx = getContext()
   const contextLine = ctx.lastOffer
     ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
     : ''
 
-  const taskCtx = getTaskContext()
+  const taskCtx    = getTaskContext()
   const followUpCtx = getFollowUpContext()
-  const patternCtx = getPatternContext()
-  const extraCtx = [taskCtx, followUpCtx, patternCtx].filter(Boolean).join('\n')
+  const patternCtx  = getPatternContext()
+  const extraCtx    = [taskCtx, followUpCtx, patternCtx].filter(Boolean).join('\n')
 
-  const res = await fetch(CONFIG.OLLAMA_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: CONFIG.OLLAMA_MODEL,
-      messages: [
-        { role: 'system', content: TIGHT_PROMPT },
-        {
-          role: 'user',
-          content: `${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nEvent: ${event}\nTranscript: "${transcript}"`,
-        },
-      ],
-      stream: false,
-    }),
-  })
+  const remaining = deadline - Date.now()
+  if (remaining <= 50) {
+    console.log('[LLM] skipped — latency budget exhausted')
+    return null
+  }
 
-  const data = await res.json() as { message: { content: string } }
-  const raw = data.message.content.trim().replace(/['"`.]/g, '').trim()
+  try {
+    const res = await fetch(CONFIG.OLLAMA_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: CONFIG.OLLAMA_MODEL,
+        messages: [
+          { role: 'system', content: TIGHT_PROMPT },
+          {
+            role: 'user',
+            content: `${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nEvent: ${event}\nTranscript: "${transcript}"`,
+          },
+        ],
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(remaining),
+    })
 
-  if (!raw || raw.toUpperCase() === 'PASS') return null
+    const data = await res.json() as { message: { content: string } }
+    const raw = data.message.content.trim().replace(/['"`.]/g, '').trim()
 
-  const actions = ['Reject', 'Accept', 'Ask', 'Push', 'Wait', 'Challenge', 'Clarify', 'Delay', 'Anchor', 'Exit']
-  if (!actions.some(a => raw.startsWith(a))) return null
+    if (!raw || raw.toUpperCase() === 'PASS') return null
 
-  return raw.split(/\s+/).slice(0, 4).join(' ')
+    const actions = ['Reject','Accept','Ask','Push','Wait','Challenge','Clarify','Delay','Anchor','Exit']
+    if (!actions.some(a => raw.startsWith(a))) return null
+
+    return raw.split(/\s+/).slice(0, 4).join(' ')
+  } catch {
+    console.log('[LLM] timed out — rules-only fallback')
+    return null
+  }
 }
 
-// ── Side effects: tasks, people, follow-ups ────────────────────────────────
+// ── Side effects ───────────────────────────────────────────────────────────
 
-function processSideEffects(transcript: string, intent: string | null, offer: number | null): void {
-  // 1. Update people records
+function processSideEffects(
+  transcript: string,
+  intent: string | null,
+  offer: number | null,
+  person: string | null
+): void {
+  // people
   updatePeopleFromTranscript(transcript, intent, offer)
 
-  // 2. Detect and store follow-up
+  // follow-up
   const fuDetected = detectFollowUp(transcript)
   if (fuDetected) {
-    const peopleCtx = getPeopleContext(transcript)
-    createFollowUp(transcript, fuDetected, peopleCtx ?? undefined).catch(console.error)
+    const pCtx = getPeopleContext(transcript)
+    createFollowUp(transcript, fuDetected, pCtx ?? undefined)
+      .then(fu => {
+        // register in pressure system
+        createPressureItem(
+          fu.id, 'followup', fu.suggestedAction,
+          fu.person, fu.priority, fuDetected.delayHours * 3600_000
+        )
+      })
+      .catch(console.error)
   }
 
-  // 3. Detect and store task
+  // task
   const taskData = extractTaskFromTranscript(transcript)
   if (taskData) {
-    addTask(taskData)
+    const task = addTask(taskData)
+    createPressureItem(
+      task.id, 'task', task.description,
+      task.person, task.priority,
+      (task.resurfaceAt ?? Date.now() + 3_600_000) - Date.now()
+    )
   }
+
+  // episodic memory — store as structured event
+  storeEpisode(transcript, person).catch(console.error)
 }
 
 // ── Main decide ───────────────────────────────────────────────────────────
 
 export async function decide(transcript: string): Promise<string | null> {
-  const t0 = Date.now()
+  const t0       = Date.now()
+  const deadline = t0 + CONFIG.LATENCY_BUDGET_MS   // hard cap
 
-  // store in memory
-  const turn = remember(transcript)
+  // memory
+  const turn  = remember(transcript)
   const event = classifyEvent(transcript)
   console.log(`[EVENT] ${event}`)
 
-  // side effects (non-blocking, fire async)
-  processSideEffects(transcript, turn.intent, turn.offer)
+  // extract primary person from transcript for context
+  const person = turn.speaker !== 'unknown'
+    ? null   // speaker known — no name needed
+    : transcript.match(/([A-Z][a-z]{1,14})/)?.[1] ?? null
 
-  // 1. rules — 0ms, exact patterns
+  // side effects (non-blocking)
+  processSideEffects(transcript, turn.intent, turn.offer, person)
+
+  // ── steering — predict trajectory ─────────────────────────────────────
+  const steering = await steer(transcript, false)
+  if (steering.preloadMessage) {
+    console.log(`[STEER] preload → "${steering.preloadMessage}"`)
+  }
+
+  // ── collect candidates ─────────────────────────────────────────────────
+  const candidates: ActionCandidate[] = []
+
+  // 1. Rule (0ms)
   const ruleHit = matchRule(transcript, currentMode)
   if (ruleHit) {
+    candidates.push({ command: 'WAIT', message: ruleHit, source: 'rule', score: 1.0 })
     console.log(`[RULE] ${Date.now() - t0}ms — "${ruleHit}"`)
-    logDecision(transcript, event, ruleHit, 'rule', currentMode, null, turn.offer)
-    return ruleHit
   }
 
-  // 2. embeddings — ~5ms, semantic matching
-  const embedMatch = await matchEmbedding(transcript)
-  if (embedMatch) {
-    console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
-    logDecision(transcript, event, embedMatch.action, 'embedding', currentMode, null, turn.offer)
-    return embedMatch.action
+  // 2. Embedding (~5ms)
+  if (Date.now() < deadline - 10) {
+    const embedMatch = await matchEmbedding(transcript)
+    if (embedMatch) {
+      candidates.push({ command: 'WAIT', message: embedMatch.action, source: 'embedding', score: embedMatch.score })
+      console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
+    }
   }
 
-  // 3. LLM — high impact events that rules + embeddings missed
-  if (isHighImpact(event)) {
-    console.log(`[LLM] fallback for ${event}`)
-    const llmResult = await llmFallback(transcript, event)
-    console.log(`[LLM] ${Date.now() - t0}ms — "${llmResult ?? 'PASS'}"`)
-    if (llmResult) logDecision(transcript, event, llmResult, 'llm', currentMode, null, turn.offer)
-    return llmResult
+  // 3. LLM — only if high impact AND time budget remains
+  if (isHighImpact(event) && Date.now() < deadline - 200) {
+    const llmResult = await llmFallback(transcript, event, deadline)
+    if (llmResult) {
+      candidates.push({ command: 'WAIT', message: llmResult, source: 'llm', score: 0.7 })
+      console.log(`[LLM] ${Date.now() - t0}ms — "${llmResult}"`)
+    }
+  } else if (!isHighImpact(event) && !candidates.length) {
+    // non-high-impact, no rule/embed hit — use steering preload if available
+    if (steering.preloadMessage) {
+      candidates.push({ command: 'WAIT', message: steering.preloadMessage, source: 'rule', score: 0.65 })
+    }
   }
 
-  console.log(`[PASS] ${Date.now() - t0}ms`)
-  return null
+  if (!candidates.length) {
+    console.log(`[PASS] ${Date.now() - t0}ms`)
+    return null
+  }
+
+  // ── select best ────────────────────────────────────────────────────────
+  const best: BestAction | null = selectBestAction(candidates, event)
+  if (!best) return null
+
+  const totalMs = Date.now() - t0
+  console.log(`[DECIDE] ${totalMs}ms — "${best.message}" urgency=${best.urgency} conf=${best.confidence}`)
+
+  // ── identity boost — mention high-importance person → escalate urgency ──
+  const highImportance = getHighImportancePeople(transcript)
+  if (highImportance.length) {
+    console.log(`[IDENTITY] ${highImportance[0].urgencyLabel}`)
+  }
+
+  logDecision(transcript, event, best.message, best.source, currentMode, person, turn.offer)
+
+  return best.message
 }
 
-// ── Re-export context helpers for index.ts ─────────────────────────────────
+// ── Outcome feedback — wires to adaptive weights ───────────────────────────
 
-export { getTaskContext, getPeopleContext, getFollowUpContext, getPatternContext }
+export function reportOutcome(message: string, outcome: 'success' | 'ignored' | 'lost'): void {
+  if (outcome === 'success') recordSuccess(message)
+  else if (outcome === 'ignored') recordIgnored(message)
+  else recordIgnored(message) // lost also penalizes
+}
+
+// ── Re-export context helpers ─────────────────────────────────────────────
+
+export {
+  getTaskContext,
+  getPeopleContext,
+  getFollowUpContext,
+  getPatternContext,
+  getTrajectoryContext,
+  getEpisodicContext,
+  getIdentityContext,
+}

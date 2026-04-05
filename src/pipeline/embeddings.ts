@@ -8,61 +8,68 @@ interface Example {
 
 const EXAMPLES: Example[] = [
   // price objections
-  { text: "that's too expensive for us", action: "Anchor — ROI" },
-  { text: "we can't afford that right now", action: "Anchor — ROI" },
-  { text: "the price is way too high", action: "Anchor — ROI" },
-  { text: "we don't have budget for this", action: "Anchor — ROI" },
-  { text: "that's out of our price range", action: "Anchor — ROI" },
-  { text: "that's a lot of money for us", action: "Anchor — ROI" },
-  { text: "we're tight on budget right now", action: "Anchor — ROI" },
-  { text: "can you do anything on the price", action: "Reject — hold price" },
-  { text: "is there any flexibility there", action: "Reject — hold price" },
-  { text: "can we get a discount", action: "Reject — hold price" },
+  { text: "that's too expensive for us", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "we can't afford that right now", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "the price is way too high", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "we don't have budget for this", action: "Budget frozen — timing issue | ask when resets" },
+  { text: "that's out of our price range", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "that's a lot of money for us", action: "⚠ Price objection — fear signal | hold number" },
+  { text: "we're tight on budget right now", action: "Budget frozen — timing issue | ask when resets" },
+  { text: "can you do anything on the price", action: "⚠ Discount asked — frame breaking | reject, add value" },
+  { text: "is there any flexibility there", action: "⚠ Discount asked — frame breaking | reject, add value" },
+  { text: "can we get a discount", action: "⚠ Discount asked — frame breaking | reject, add value" },
 
   // stalling
-  { text: "let me think about it", action: "Wait — silence" },
-  { text: "i need more time to decide", action: "Wait — silence" },
-  { text: "i'll get back to you", action: "Ask — what stops you" },
-  { text: "we're not ready to move forward yet", action: "Ask — what changes" },
-  { text: "maybe next quarter", action: "Ask — what changes" },
+  { text: "let me think about it", action: "They stalled — buying time | wait silent" },
+  { text: "i need more time to decide", action: "They stalled — buying time | wait silent" },
+  { text: "i'll get back to you", action: "Stall signal — momentum dying | ask what stops you" },
+  { text: "we're not ready to move forward yet", action: "Timing deflection — avoiding decision | ask what changes" },
+  { text: "maybe next quarter", action: "Timing deflection — avoiding decision | ask what changes" },
 
   // authority
-  { text: "i need to check with my team", action: "Ask — who decides" },
-  { text: "my boss has to approve this", action: "Ask — who decides" },
-  { text: "i can't make this decision alone", action: "Ask — who decides" },
-  { text: "let me run it by our CFO", action: "Ask — who decides" },
-  { text: "i have to go over it with my manager", action: "Ask — who decides" },
+  { text: "i need to check with my team", action: "Approval needed — not decision maker | ask who" },
+  { text: "my boss has to approve this", action: "Approval needed — not decision maker | ask who" },
+  { text: "i can't make this decision alone", action: "Approval needed — not decision maker | ask who" },
+  { text: "let me run it by our CFO", action: "Approval needed — not decision maker | ask who" },
+  { text: "i have to go over it with my manager", action: "Approval needed — not decision maker | ask who" },
 
   // competitor
-  { text: "we already use servicetitan", action: "Challenge — whats missing" },
-  { text: "we have a system in place", action: "Challenge — whats missing" },
-  { text: "we're happy with our current solution", action: "Challenge — switching cost" },
-  { text: "we use another platform for that", action: "Challenge — whats missing" },
+  { text: "we already use servicetitan", action: "Competitor mentioned — pain unaddressed | find the gap" },
+  { text: "we have a system in place", action: "Competitor mentioned — pain unaddressed | find the gap" },
+  { text: "we're happy with our current solution", action: "Competitor lock-in — switching cost fear | surface the gap" },
+  { text: "we use another platform for that", action: "Competitor mentioned — pain unaddressed | find the gap" },
 
   // agreement signals
-  { text: "that sounds really good", action: "Push — close now" },
-  { text: "i think we're interested", action: "Push — close now" },
-  { text: "we'd like to move forward", action: "Accept — confirm terms" },
-  { text: "i think we can make this work", action: "Push — close now" },
+  { text: "that sounds really good", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "i think we're interested", action: "⚠ Agreement signal — deal closing | push to close" },
+  { text: "we'd like to move forward", action: "⚠ Agreement signal — deal closing | confirm terms now" },
+  { text: "i think we can make this work", action: "⚠ Agreement signal — deal closing | push to close" },
 
   // seller rambling
-  { text: "and also we have this feature and that feature and you can do this and that", action: "Wait — let talk" },
-  { text: "so basically what we do is we take your data and we process it and then we", action: "Wait — let talk" },
-  { text: "let me explain everything we offer starting with the first module", action: "Wait — let talk" },
+  { text: "and also we have this feature and that feature and you can do this and that", action: "Rambling detected — losing frame | stop, ask question" },
+  { text: "so basically what we do is we take your data and we process it and then we", action: "Rambling detected — losing frame | stop, ask question" },
+  { text: "let me explain everything we offer starting with the first module", action: "Rambling detected — losing frame | stop, ask question" },
 
   // meeting
-  { text: "i think the numbers show about 40 percent growth", action: "Challenge — source" },
-  { text: "we should probably assign someone to own this", action: "Clarify — who owns" },
-  { text: "let's table this and move on", action: "Anchor — revisit" },
+  { text: "i think the numbers show about 40 percent growth", action: "⚠ Stat uncited — credibility risk | ask the source" },
+  { text: "we should probably assign someone to own this", action: "No owner assigned — task will die | name someone" },
+  { text: "let's table this and move on", action: "Topic buried — decision delayed | redirect now" },
 
   // interview
-  { text: "what would you say is your biggest weakness", action: "Clarify — reframe growth" },
-  { text: "what are your salary expectations", action: "Delay — their range" },
-  { text: "tell me about yourself", action: "Anchor — lead impact" },
+  { text: "what would you say is your biggest weakness", action: "Trap question — reframe risk | lead with growth" },
+  { text: "what are your salary expectations", action: "⚠ Comp question — anchor risk | flip to their range" },
+  { text: "tell me about yourself", action: "Open framing — first impression | lead with impact" },
 
   // social
-  { text: "so what do you do", action: "Anchor — your work" },
-  { text: "i just feel like nobody really gets it", action: "Wait — let talk" },
+  { text: "so what do you do", action: "Opportunity window — closing fast | anchor your work" },
+  { text: "i just feel like nobody really gets it", action: "Oversharing detected — value dropping | stop talking" },
+  { text: "i'm an investor looking at early stage", action: "Investor detected — high leverage | engage directly" },
+  { text: "we run a fund focused on B2B", action: "Investor detected — high leverage | engage directly" },
+
+  // brutal honesty — self-detection
+  { text: "well i mean it depends i guess maybe we could", action: "⚠ Weak answer — value unclear | restate with confidence" },
+  { text: "i don't know it could be a lot of things", action: "⚠ Weak answer — value unclear | restate with confidence" },
+  { text: "sure we can probably do something", action: "⚠ Conceding — frame collapsing | hold position" },
 
   // meta questions to ARIA — active mode triggers
   { text: "what should I say right now", action: "ARIA_QUERY" },
