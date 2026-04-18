@@ -1,0 +1,25 @@
+{
+  "name": "aria-adversarial-test-suite",
+  "version": "4.0.0",
+  "description": "Comprehensive adversarial test suite for the ARIA real-time AI decision assistant",
+  "type": "module",
+  "scripts": {
+    "test": "npx tsx src/harness/runner.ts --suite=all",
+    "test:latency": "npx tsx src/harness/runner.ts --suite=latency",
+    "test:accuracy": "npx tsx src/harness/runner.ts --suite=accuracy",
+    "test:edge": "npx tsx src/harness/runner.ts --suite=edge",
+    "test:memory": "npx tsx src/harness/runner.ts --suite=memory",
+    "test:failure": "npx tsx src/harness/runner.ts --suite=failure",
+    "test:scenarios": "npx tsx src/harness/runner.ts --suite=scenarios",
+    "test:report": "npx tsx src/harness/runner.ts --suite=all --report=json",
+    "bench": "npx tsx src/bench.ts",
+    "validate": "npx tsx src/validate.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}
