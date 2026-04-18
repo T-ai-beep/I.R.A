@@ -107,6 +107,8 @@ const SIGNALS: FollowUpSignal[] = [
     action: 'Follow up — when budget resets', delayHours: 168, priority: 'cold' },
   { pattern: /(?:not my (?:call|decision)|have to ask)/i,
     action: 'Follow up — decision pending', delayHours: 72, priority: 'cold' },
+  { pattern: /(?:send|forward|email)\s+(?:me|us|over)?\s*(?:the\s+)?(?:contract|proposal|agreement)/i,
+  action: 'Follow up — send contract', delayHours: 1, priority: 'hot' },
 ]
 
 // ── Extract person ─────────────────────────────────────────────────────────

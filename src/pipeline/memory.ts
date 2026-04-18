@@ -156,12 +156,16 @@ function updateIntent(newIntent: string): void {
   const highSignal = HIGH_SIGNAL_INTENTS.includes(newIntent)
   const contradicts = isContradiction(prev, newIntent)
 
+  // Never let a low-signal intent overwrite a high-signal one
+  if (prev && HIGH_SIGNAL_INTENTS.includes(prev) && !highSignal && !contradicts) {
+    state.intentAge += 1
+    return
+  }
+
   if (!prev || highSignal || contradicts) {
-    // Always set: first intent, high-signal intent, or contradiction
     state.lastIntent = newIntent
     state.intentAge = 0
   } else {
-    // Lower-signal, non-contradicting: still update but track age
     state.lastIntent = newIntent
     state.intentAge += 1
   }

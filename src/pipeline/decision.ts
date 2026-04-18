@@ -12,8 +12,9 @@ import { steer, getTrajectoryContext } from './steering.js'
 import { storeEpisode, getEpisodicContext } from '../pipeline/epsodic.js'
 import { getIdentityContext, getHighImportancePeople } from './identityScore.js'
 import { createPressureItem } from './pressure.js'
-import { matchPlaybook, executePlay, FORCED_RESPONSE_EVENTS, getForcedFallback } from './playbook.js'
+import { FORCED_RESPONSE_EVENTS, getForcedFallback } from './playbook.js'
 import { speak } from './tts.js'
+import { getCoachSession } from './negotiationCoach.js'
 
 export type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -29,6 +30,9 @@ export type EventType =
   | 'UNKNOWN'
 
 let currentMode: Mode = 'negotiation'
+
+// ── Dedup guard — never speak the same line twice in a row ────────────────
+let lastSpoken: string | null = null
 
 export function setMode(mode: Mode): void {
   currentMode = mode
@@ -91,8 +95,6 @@ function classifyEvent(transcript: string): EventType {
 }
 
 // ── Reversal detection ────────────────────────────────────────────────────
-// "actually wait", "let me check", "never mind" after an agreement signal
-// means the prospect is pulling back. Suppress closing pushes.
 
 const REVERSAL_PATTERN = /\b(actually|wait|hold on|let me check|never mind|on second thought)\b/i
 
@@ -101,22 +103,15 @@ function detectReversal(transcript: string): boolean {
 }
 
 // ── Strategic WAIT gate ───────────────────────────────────────────────────
-// Silence is a first-class decision. Return true to suppress all responses.
 
 function shouldWait(transcript: string, event: EventType): boolean {
-  // Very short utterances with no signal — don't fire into the void
   const wordCount = transcript.trim().split(/\s+/).length
   if (wordCount <= 2 && event === 'UNKNOWN') return true
-
-  // Reversal after agreement — observe before pushing close again
   if (detectReversal(transcript) && event === 'UNKNOWN') return true
-
   return false
 }
 
 // ── Prior-intent contradiction check ─────────────────────────────────────
-// Only gates the fast path when the current event directly contradicts
-// what the prospect just said. Avoids false slow-paths on normal context shifts.
 
 const CONTRADICTING_PRIOR: Partial<Record<string, EventType[]>> = {
   'AGREEMENT': ['PRICE_OBJECTION', 'STALLING', 'AUTHORITY'],
@@ -130,9 +125,6 @@ function priorContradicts(event: EventType): boolean {
 }
 
 // ── Compound signal detection ─────────────────────────────────────────────
-// Catches price challenge after competitor/panic — a common missed signal.
-// "Unless you can beat their price by 20 percent" has no direct rule match
-// but is clearly a discount demand following a competitor mention.
 
 function detectCompoundSignal(transcript: string): ActionCandidate | null {
   const isPriceChallenge = /beat|match|percent.*lower|come down|beat their price/i.test(transcript)
@@ -160,6 +152,8 @@ function isHighImpact(event: EventType): boolean {
 
 const FAST_PATH_THRESHOLD = 0.90
 
+// ── OPT-6: Static system prompt — Ollama reuses KV cache across calls ─────
+// Never put dynamic content here. Everything dynamic goes in the user message.
 const TIGHT_PROMPT = `You are ARIA, a real-time decision coach in an earpiece.
 Output ONE line only: ACTION — phrase
 ACTION must be one of: Reject Accept Ask Push Wait Challenge Clarify Delay Anchor Exit
@@ -167,6 +161,16 @@ phrase is 2–3 words MAX. Total output: 4–6 words.
 Examples: "Anchor — hold the number" / "Ask — what changed" / "Push — close now"
 If nothing actionable: PASS
 No punctuation. No explanation. No quotes.`
+
+// ── Dedup helper ──────────────────────────────────────────────────────────
+function speakDeduped(message: string): void {
+  if (message === lastSpoken) {
+    console.log(`[DEDUP] identical consecutive output suppressed — "${message}"`)
+    return
+  }
+  lastSpoken = message
+  speak(message)
+}
 
 async function llmFallbackStreaming(
   transcript: string,
@@ -197,11 +201,14 @@ async function llmFallbackStreaming(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: CONFIG.OLLAMA_MODEL,
+        keep_alive: '10m',  // OPT-6: keep model loaded, reuse KV cache
         messages: [
+          // OPT-6: system message is static — Ollama caches this
           { role: 'system', content: TIGHT_PROMPT },
           {
+            // OPT-6: all dynamic content lives here only
             role: 'user',
-            content: `${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nEvent: ${event}\nTranscript: "${transcript}"`,
+            content: `Event: ${event}\n${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nTranscript: "${transcript}"`,
           },
         ],
         stream: true,
@@ -253,7 +260,7 @@ async function llmFallbackStreaming(
               console.log(`[LLM-STREAM] first speak() @ ${Date.now() - t0}ms`)
               firstSpeak = false
             }
-            speak(chunk)
+            speakDeduped(chunk)
           }
           wordBuffer = ''
         }
@@ -262,7 +269,7 @@ async function llmFallbackStreaming(
 
     const tail = wordBuffer.trim()
     if (tail && tail.toUpperCase() !== 'PASS' && tail.length > 1) {
-      speak(tail)
+      speakDeduped(tail)
     }
 
     const raw = fullOutput.trim().replace(/['"`.]/g, '').trim()
@@ -281,10 +288,7 @@ async function llmFallbackStreaming(
   }
 }
 
-// ── Side effects (fully async, deferred to next tick via setImmediate) ────
-// Wrapping in setImmediate ensures ALL sync fs operations in people.ts,
-// followup.ts, tasks.ts, and episodic.ts happen AFTER decide() returns.
-// This removes 100-180ms of blocking I/O from the hot path.
+// ── Side effects ──────────────────────────────────────────────────────────
 
 function processSideEffects(
   transcript: string,
@@ -338,18 +342,15 @@ export async function decide(transcript: string): Promise<string | null> {
     ? null
     : transcript.match(/([A-Z][a-z]{1,14})/)?.[1] ?? null
 
-  // Side effects fire on next tick — never block the decision path
   processSideEffects(transcript, turn.intent, turn.offer, person)
 
   // ── Strategic WAIT gate ───────────────────────────────────────────────
-  // Checked before any candidates are built. Silence is intentional here.
   if (shouldWait(transcript, event)) {
     console.log('[WAIT] strategic silence')
     logDecision(transcript, event, 'WAIT', 'rule', modeAtCall, person, turn.offer)
     return null
   }
 
-  // Steering: fast rule-based only (no LLM)
   const steering = await steer(transcript, false)
   if (steering.preloadMessage) {
     console.log(`[STEER] preload → "${steering.preloadMessage}"`)
@@ -357,20 +358,24 @@ export async function decide(transcript: string): Promise<string | null> {
 
   const candidates: ActionCandidate[] = []
 
-  // ── [0] Playbook (negotiation only) ──────────────────────────────────
-  let play = null
+  // ── [0] Coach — stateful brain (negotiation only) ─────────────────────
+  let coachFired = false
   if (modeAtCall === 'negotiation') {
-    play = matchPlaybook(transcript)
-    if (play) {
-      const playbookResponse = executePlay(play)
-      const playbookScore    = play.mustRespond ? 0.95 : 0.70
+    const coachTurn = getCoachSession().process(transcript)
+    if (!coachTurn.wait && coachTurn.response) {
       candidates.push({
         command: 'WAIT',
-        message: playbookResponse,
+        message: coachTurn.response,
         source:  'rule',
-        score:   playbookScore,
+        score:   0.96,
       })
-      console.log(`[PLAY] ${play.key} score=${playbookScore} — "${playbookResponse}"`)
+      coachFired = true
+      console.log(`[COACH] L${coachTurn.level}/${coachTurn.levelName} — "${coachTurn.response}"`)
+    } else if (coachTurn.wait) {
+      if (!FORCED_RESPONSE_EVENTS.has(event)) {
+        console.log('[COACH] strategic silence')
+        return null
+      }
     }
   }
 
@@ -382,57 +387,45 @@ export async function decide(transcript: string): Promise<string | null> {
   }
 
   // ── [1b] Compound signal detection ───────────────────────────────────
-  // Runs after rules — catches price-after-competitor and similar stacked signals
-  // that don't match any individual rule pattern.
   if (!ruleHit && modeAtCall === 'negotiation') {
     const compound = detectCompoundSignal(transcript)
     if (compound) candidates.push(compound)
   }
 
   // ── FAST PATH ─────────────────────────────────────────────────────────
-  // Skip embed + LLM when a strong candidate exists.
-  // If prior intent contradicts current event, apply a soft penalty (0.92×)
-  // to avoid blindly pushing close immediately after a reversal.
-  // Rules score 1.0 and mustRespond plays score 0.95 — both clear 0.92×0.90=0.828
-  // easily, so contradiction only slows down ambiguous low-score candidates.
-  const contradicts = priorContradicts(event)
+  const contradicts        = priorContradicts(event)
   const effectiveThreshold = contradicts ? FAST_PATH_THRESHOLD * 0.92 : FAST_PATH_THRESHOLD
   const hasStrongCandidate = candidates.some(c => c.score >= effectiveThreshold)
-
-  // Reversal guard: even if we have a strong agreement candidate,
-  // suppress it when the prospect is clearly pumping the brakes.
-  const suppressAgreement = detectReversal(transcript) && event === 'AGREEMENT'
+  const suppressAgreement  = detectReversal(transcript) && event === 'AGREEMENT'
 
   if (hasStrongCandidate && event !== 'QUESTION' && !suppressAgreement) {
     const best = selectBestAction(candidates, event)
     if (best) {
       const ms = Date.now() - t0
-      console.log(`[FAST PATH] ${ms}ms — skipped embed+LLM — "${best.message}"`)
+      console.log(`[FAST PATH] ${ms}ms — "${best.message}"`)
       logDecision(transcript, event, best.message, best.source, modeAtCall, person, turn.offer)
 
-      // mustRespond override: prefer actionable playbook response
-      // over observational rule label (e.g. "⚠ Price objection — fear signal")
-      if (play?.mustRespond) {
+      if (coachFired) {
         const isObservational = (
           best.message.startsWith('⚠') ||
           /fear signal|frame breaking|pain unaddressed|buying time/i.test(best.message)
         )
         if (isObservational) {
-          const playbookCandidate = candidates.find(c => c.score === 0.95)
-          if (playbookCandidate) {
-            console.log(`[FAST PATH] mustRespond override`)
-            speak(playbookCandidate.message)
-            return playbookCandidate.message
+          const coachCandidate = candidates.find(c => c.score === 0.96)
+          if (coachCandidate) {
+            console.log(`[FAST PATH] coach override — dropping observational label`)
+            speakDeduped(coachCandidate.message)
+            return coachCandidate.message
           }
         }
       }
 
-      speak(best.message)
+      speakDeduped(best.message)
       return best.message
     }
   }
 
-  // ── [2] Embedding (LRU cached — repeated phrases ~0ms) ───────────────
+  // ── [2] Embedding ─────────────────────────────────────────────────────
   if (Date.now() < deadline - 10) {
     const embedMatch = await Promise.race([
       matchEmbedding(transcript),
@@ -447,7 +440,7 @@ export async function decide(transcript: string): Promise<string | null> {
     }
   }
 
-  // ── [3] LLM streaming (high-impact events and QUESTION) ───────────────
+  // ── [3] LLM streaming ─────────────────────────────────────────────────
   if (isHighImpact(event) && Date.now() < deadline - 200) {
     const llmResult = await llmFallbackStreaming(transcript, event, deadline)
     if (llmResult) {
@@ -462,7 +455,7 @@ export async function decide(transcript: string): Promise<string | null> {
     }
   }
 
-  // ── [4] Forced fallback (money/close events — never go silent) ────────
+  // ── [4] Forced fallback ───────────────────────────────────────────────
   if (!candidates.length && modeAtCall === 'negotiation' && FORCED_RESPONSE_EVENTS.has(event)) {
     const fallback = getForcedFallback(event)
     if (fallback) {
@@ -479,19 +472,18 @@ export async function decide(transcript: string): Promise<string | null> {
   const best: BestAction | null = selectBestAction(candidates, event)
   if (!best) return null
 
-  // mustRespond override (slow path)
-  if (play?.mustRespond) {
-    const playbookCandidate = candidates.find(c => c.score === 0.95)
+  // Slow path coach override
+  if (coachFired) {
+    const coachCandidate = candidates.find(c => c.score === 0.96)
     const isObservational = (
       best.message.startsWith('⚠') ||
       /fear signal|frame breaking|pain unaddressed|buying time/i.test(best.message)
     )
-    if (playbookCandidate && isObservational) {
-      console.log(`[EXEC] mustRespond override`)
-      const execMessage = playbookCandidate.message
-      logDecision(transcript, event, execMessage, 'rule', modeAtCall, person, turn.offer)
-      speak(execMessage)
-      return execMessage
+    if (coachCandidate && isObservational) {
+      console.log(`[EXEC] coach override`)
+      logDecision(transcript, event, coachCandidate.message, 'rule', modeAtCall, person, turn.offer)
+      speakDeduped(coachCandidate.message)
+      return coachCandidate.message
     }
   }
 
@@ -504,7 +496,7 @@ export async function decide(transcript: string): Promise<string | null> {
   }
 
   logDecision(transcript, event, best.message, best.source, modeAtCall, person, turn.offer)
-  speak(best.message)
+  speakDeduped(best.message)
   return best.message
 }
 

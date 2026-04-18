@@ -1,7 +1,7 @@
 export const CONFIG = {
   // Paths
   WHISPER_CLI: '/Users/tanayshah/A.R.I.A/whisper.cpp/build/bin/whisper-cli',
-  WHISPER_MODEL: '/Users/tanayshah/A.R.I.A/whisper.cpp/models/ggml-small.en.bin',
+  WHISPER_MODEL: '/Users/tanayshah/A.R.I.A/whisper.cpp/models/ggml-tiny.en.bin',
   VENV_PYTHON: '/Users/tanayshah/A.R.I.A/.venv/bin/python3',
 
   // Audio
