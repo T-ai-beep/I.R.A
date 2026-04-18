@@ -1,11 +1,14 @@
 /**
- * index.ts
- * ARIA — streaming pipeline
+ * index.ts — ARIA streaming pipeline (updated)
  *
  * Changes from previous version:
- * 1. decide() now calls speak() internally — removed redundant speak() here
- * 2. ariaRespond() uses streaming LLM → TTS via same pattern as llmFallbackStreaming
- * 3. No other logic changed
+ *   1. VAD now emits { audio, speaker, confidence } on speechEnd
+ *   2. Pipeline skips if speaker === 'self' (already filtered in VAD, but double-checked here)
+ *   3. Session manager is updated with transcript + intent + offer on each turn
+ *   4. Session context injected into ariaRespond prompt
+ *   5. 'selfSpeech' event handled (HUD indicator only, no pipeline)
+ *   6. Session auto-closes on SIGINT with summary logged
+ *   7. setMode() also updates session manager mode
  */
 
 const ACTIVE_MODE_TIMEOUT_MS = 12_000
@@ -37,19 +40,20 @@ async function init() {
   const { clearMemory, getContext, getLastTurn } = await import('./pipeline/memory.js')
   const { loadKnowledgeBase, ragQuery, saveToHistory } = await import('./pipeline/rag.js')
   const { getDueItems, getForcedItems, fireItem } = await import('./pipeline/pressure.js')
+  const { getSessionManager } = await import('./pipeline/session.js')
+  const { VAD, SpeechEndPayload, SpeechChunkPayload } = await import('./audio/vad.js') as any
 
   type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
   const modeArg = process.argv.find(a => a.startsWith('--mode='))
   const mode    = (modeArg?.split('=')[1] ?? 'negotiation') as Mode
 
+  const sessionMgr = getSessionManager()
+  sessionMgr.setMode(mode)
+
   setMode(mode)
 
-  const { VAD } = await import('./audio/vad.js')
-
   // ── ariaRespond: streaming LLM → TTS ─────────────────────────────────────
-  // Mirrors llmFallbackStreaming — speaks as tokens arrive.
-  // Called when snap-activated or QUESTION event with no rule hit.
 
   async function ariaRespond(transcript: string): Promise<string> {
     const ctx = getContext()
@@ -59,9 +63,11 @@ async function init() {
 
     const ragContext    = await ragQuery(transcript, { useWeb: true, useHistory: true, useKB: true })
     const ragLine       = ragContext ? `\n\nContext:\n${ragContext}` : ''
+    const sessionCtx    = sessionMgr.getSessionContext()
     const leverageLine  = [
       getTaskContext(), getFollowUpContext(), getPeopleContext(transcript),
-      getTrajectoryContext(), await getEpisodicContext(transcript), getIdentityContext(transcript),
+      getTrajectoryContext(), await getEpisodicContext(transcript),
+      getIdentityContext(transcript), sessionCtx,
     ].filter(Boolean).join('\n\n')
 
     const systemPrompt = `You are ARIA, a real-time personal AI in an earpiece.
@@ -84,7 +90,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
             { role: 'system', content: systemPrompt },
             { role: 'user',   content: transcript },
           ],
-          stream: true,   // ← streaming
+          stream: true,
         }),
       })
 
@@ -98,11 +104,9 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
         if (done) break
 
         const chunk = decoder.decode(value, { stream: true })
-
         for (const line of chunk.split('\n')) {
           const trimmed = line.trim()
           if (!trimmed) continue
-
           let parsed: { message?: { content?: string }; done?: boolean }
           try { parsed = JSON.parse(trimmed) } catch { continue }
           if (parsed.done) break
@@ -118,7 +122,6 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
           buffer       += token
           fullResponse += token
 
-          // Speak every 3 words
           const wordCount = buffer.trim().split(/\s+/).filter(Boolean).length
           if (wordCount >= 3) {
             const clean = enforceOutput(buffer.trim())
@@ -128,13 +131,11 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
         }
       }
 
-      // Flush tail
       const tail = enforceOutput(buffer.trim())
       if (tail) speak(tail)
 
     } catch (e) {
       console.error('[ARIA] stream error', e)
-      // Fallback: speak what we have
       if (fullResponse.trim()) speak(enforceOutput(fullResponse.trim()))
     }
 
@@ -182,7 +183,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
 
   let processingChunk = false
   let ariaActive      = false
-  let activeTimeout: ReturnType<typeof setTimeout> | null = null
+  let activeTimeout:  ReturnType<typeof setTimeout> | null = null
 
   function activateAria() {
     ariaActive = true
@@ -205,12 +206,22 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
 
   const pressureTimer = startPressureLoop(speak, isActive)
 
-  async function processAudio(audio: Buffer, label: string) {
+  // ── Audio processing ───────────────────────────────────────────────────────
+
+  async function processAudio(audio: Buffer, label: string, speaker: 'self' | 'other' | 'unknown' = 'other') {
+    // Double-check: never process self-speech through the decision pipeline
+    if (speaker === 'self' && !ariaActive) {
+      console.log(`[SKIP] ${label} — self speech`)
+      return
+    }
+
     if (processingChunk) {
       console.log(`[SKIP] ${label} — already processing`)
       return
     }
+
     processingChunk = true
+
     try {
       const transcript = await transcribe(audio)
       if (!transcript) return
@@ -220,8 +231,19 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
         return
       }
 
-      console.log(`[${label}] — "${transcript}"`)
+      console.log(`[${label}] speaker=${speaker} — "${transcript}"`)
       saveToHistory({ ts: Date.now(), transcript, intent: null, response: null })
+
+      // Update session manager with the real transcript + intent
+      const memCtx = getContext()
+      sessionMgr.onSpeech(transcript, speaker, memCtx.lastIntent, memCtx.lastOffer)
+
+      // Handle re-enroll voice command
+      if (/re.?enroll (my )?voice|reset voice|new voice/i.test(transcript)) {
+        await vad.reenrollVoice()
+        speak('re-enrolling your voice now, please speak for a few seconds')
+        return
+      }
 
       // Active mode: ARIA answers directly
       if (ariaActive) {
@@ -231,8 +253,6 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
       }
 
       // Passive mode: decision pipeline
-      // NOTE: decide() now calls speak() internally on every path.
-      // We do NOT call speak() here again.
       const decision = await decide(transcript)
 
       if (!decision) {
@@ -251,12 +271,10 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
         return
       }
 
-      // decision already spoken inside decide() — just log
       const enforced = enforceOutput(decision)
       console.log(`[FIRE] "${enforced}"`)
       emitARSignal('RED', enforced)
       saveToHistory({ ts: Date.now(), transcript, intent: null, response: enforced })
-      // ← NO speak() call here. decide() already spoke it.
 
     } catch (err) {
       console.error(`[ERROR] ${label}`, err)
@@ -265,18 +283,37 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     }
   }
 
-  vad.on('speechStart',  () => console.log('\n[VAD] ▶ speech start'))
-  vad.on('misfire',      () => console.log('[VAD] ✗ misfire'))
-  vad.on('snapDetected', () => ariaActive ? deactivateAria() : activateAria())
+  // ── VAD event handlers ─────────────────────────────────────────────────────
 
-  vad.on('speechChunk', async (audio: Buffer) => {
-    if (!processingChunk) processAudio(audio, 'CHUNK')
+  function normalizeSpeaker(s: string | undefined): 'self' | 'other' | 'unknown' {
+    if (s === 'self') return 'self'
+    if (s === 'other') return 'other'
+    return 'unknown'
+  }
+
+  vad.on('speechStart', () => console.log('\n[VAD] ▶ speech start'))
+  vad.on('misfire',     () => console.log('[VAD] ✗ misfire'))
+
+  vad.on('selfSpeech', ({ speechMs }: { audio: Buffer; speechMs: number }) => {
+    // Self-speech: just log / HUD indicator. No pipeline.
+    console.log(`[VAD] 🎤 self (${speechMs}ms)`)
+    // Emit AR signal so HUD shows mic icon
+    emitARSignal('GREEN', 'self speaking')
   })
 
-  vad.on('speechEnd', async (audio: Buffer) => {
+  vad.on('snapDetected', () => ariaActive ? deactivateAria() : activateAria())
+
+  vad.on('speechChunk', async ({ audio, speaker }: { audio: Buffer; speaker: string }) => {
+    const sp = normalizeSpeaker(speaker)
+    if (!processingChunk && sp !== 'self') {
+      processAudio(audio, 'CHUNK', sp)
+    }
+  })
+
+  vad.on('speechEnd', async ({ audio, speaker, confidence }: { audio: Buffer; speaker: string; confidence: number }) => {
     const ms = (audio.length / 2 / CONFIG.SAMPLE_RATE * 1000).toFixed(0)
-    console.log(`[VAD] ■ speech end — ${ms}ms`)
-    processAudio(audio, 'END')
+    console.log(`[VAD] ■ speech end — ${ms}ms speaker=${speaker} conf=${confidence.toFixed(2)}`)
+    processAudio(audio, 'END', normalizeSpeaker(speaker))
   })
 
   vad.on('error', (err: Error) => {
@@ -284,13 +321,37 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     process.exit(1)
   })
 
+  // ── Session events ─────────────────────────────────────────────────────────
+
+  sessionMgr.on('sessionStart', ({ sessionId }: { sessionId: string; ts: number }) => {
+    console.log(`\n[SESSION] ▶ new conversation — ${sessionId}`)
+    emitARSignal('GREEN', `session started`)
+  })
+
+  sessionMgr.on('sessionEnd', (summary: any) => {
+    console.log(`\n[SESSION] ■ conversation ended`)
+    console.log(`  Duration: ${Math.round(summary.durationMs / 1000)}s`)
+    console.log(`  Outcome:  ${summary.outcome}`)
+    console.log(`  Summary:  ${summary.summary}`)
+    if (summary.nextStep) console.log(`  Next:     ${summary.nextStep}`)
+    if (summary.lastOffer) console.log(`  Offer:    $${summary.lastOffer}`)
+  })
+
   vad.start()
   console.log(`\nARIA online — mode: ${mode} — double snap to activate\n`)
+  console.log(`Diarizer status: ${(await vad.getDiarizerStatus())?.enrolled ? 'enrolled' : 'will auto-enroll on first speech'}\n`)
 
-  process.on('SIGINT', () => {
-    console.log('\nshutting down')
+  process.on('SIGINT', async () => {
+    console.log('\nshutting down...')
     clearInterval(pressureTimer)
     vad.stop()
+
+    // Close session and save summary
+    const summary = await sessionMgr.closeSession()
+    if (summary) {
+      console.log(`[SESSION] final summary saved — ${summary.outcome}`)
+    }
+
     clearMemory()
     process.exit(0)
   })
