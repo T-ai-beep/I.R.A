@@ -97,10 +97,14 @@ export function extractIntent(transcript: string): string | null {
   ) return 'STALLING'
 
   // AUTHORITY — standard + adversarial
+  // FIX: added partner.*needs to (review|see|approve|sign off) and
+  //      run (this|it) by my partner to catch MEM-004a / SCEN-001-T3 phrasing
   if (
     /check with|my team|my boss|need approval|not my call|run it by/i.test(t) ||
     /my wife|my husband|she handles|he handles/i.test(t) ||
     /my business partner|my partner.*weigh|partner.*weigh in/i.test(t) ||
+    /partner.*needs to (review|see|approve|sign off)/i.test(t) ||
+    /run (this|it) by my partner/i.test(t) ||
     /our team would need to align|team.*align on/i.test(t)
   ) return 'AUTHORITY'
 

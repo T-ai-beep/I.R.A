@@ -13,6 +13,9 @@
  *   - Tier 3 ALWAYS has binary=true (corners the prospect)
  *   - FORCED_RESPONSE_EVENTS never return null
  *   - resetTiers() restores ALL play states to tier 0
+ *
+ * Perf: SIGNALS array is pre-sorted by priority descending at module load.
+ * matchPlaybook() iterates the pre-sorted array directly — no per-call sort.
  */
 
 import * as fs from 'fs'
@@ -633,7 +636,9 @@ export const TIMELINE_PLAYS: TimelinePlay[] = [
   },
 ]
 
-// ── Signal detection — sorted by priority descending ─────────────────────
+// ── Signal detection ──────────────────────────────────────────────────────
+// Pre-sorted by priority descending at module load.
+// matchPlaybook() iterates directly — no per-call sort overhead.
 
 interface PlaybookSignal {
   pattern: RegExp
@@ -641,7 +646,7 @@ interface PlaybookSignal {
   priority: number
 }
 
-const SIGNALS: PlaybookSignal[] = [
+const SIGNALS_RAW: PlaybookSignal[] = [
   // Closing / panic — highest priority
   { pattern: /let's do it|send me the contract|we're ready|we're in|i'll take it|i'm in\b|when do we start|move forward|could really work for us|yeah.*i am in|ready to sign|close this week/i,   key: 'AGREEMENT_SIGNAL',   priority: 12 },
   { pattern: /already signed|signed with them|went with|decided.*instead|chose.*over you|decided to go with.*instead/i,                                                                             key: 'PANIC_LOSING',       priority: 12 },
@@ -671,12 +676,13 @@ const SIGNALS: PlaybookSignal[] = [
   { pattern: /i don't know|i guess|kind of|sort of|it depends|not really sure/i,                                                                                                                   key: 'WEAK_ANSWER',        priority: 6  },
 ]
 
+// Pre-sort once at module load — highest priority first.
+const SIGNALS: PlaybookSignal[] = [...SIGNALS_RAW].sort((a, b) => b.priority - a.priority)
+
 // ── Match transcript to play ──────────────────────────────────────────────
 
 export function matchPlaybook(transcript: string): Play | null {
-  // Sort by priority descending — highest wins
-  const sorted = [...SIGNALS].sort((a, b) => b.priority - a.priority)
-  for (const signal of sorted) {
+  for (const signal of SIGNALS) {
     if (signal.pattern.test(transcript)) {
       return PLAYBOOK[signal.key]
     }

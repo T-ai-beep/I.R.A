@@ -415,23 +415,21 @@ const SOCIAL_RULES: Rule[] = [
   },
 ]
 
-// ── Mode → rules map (strict isolation) ───────────────────────────────────
+// ── Mode → rules map (pre-sorted by priority descending at load time) ──────
+// Sorting once here avoids re-sorting on every matchRule() call.
 
 const RULES: Record<Mode, Rule[]> = {
-  negotiation: NEGOTIATION_RULES,
-  meeting:     MEETING_RULES,
-  interview:   INTERVIEW_RULES,
-  social:      SOCIAL_RULES,
+  negotiation: [...NEGOTIATION_RULES].sort((a, b) => b.priority - a.priority),
+  meeting:     [...MEETING_RULES].sort((a, b) => b.priority - a.priority),
+  interview:   [...INTERVIEW_RULES].sort((a, b) => b.priority - a.priority),
+  social:      [...SOCIAL_RULES].sort((a, b) => b.priority - a.priority),
 }
 
 export function matchRule(transcript: string, mode: Mode): string | null {
   const rules = RULES[mode]
   if (!rules) return null
 
-  // Sort by priority descending — highest priority fires first
-  const sorted = [...rules].sort((a, b) => b.priority - a.priority)
-
-  for (const rule of sorted) {
+  for (const rule of rules) {
     for (const pattern of rule.patterns) {
       if (pattern.test(transcript)) {
         return rule.action
