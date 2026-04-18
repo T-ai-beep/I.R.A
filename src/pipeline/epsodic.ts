@@ -93,7 +93,7 @@ async function embed(text: string): Promise<number[]> {
       signal: AbortSignal.timeout(5000),
     })
     const data = await res.json() as { embeddings: number[][] }
-    return data.embeddings[0]
+    return data.embeddings[0] ?? []
   } catch { return [] }
 }
 
@@ -151,7 +151,7 @@ function findLinks(event: EpisodicEvent, all: EpisodicEvent[]): string[] {
     if (e.id === event.id) continue
     const samePerson = event.person && e.person &&
       e.person.toLowerCase() === event.person.toLowerCase()
-    const tagOverlap = event.tags.some(t => e.tags.includes(t))
+    const tagOverlap = (event.tags ?? []).some(t => (e.tags ?? []).includes(t))
     if (samePerson || tagOverlap) {
       links.push(e.id)
     }
@@ -248,7 +248,7 @@ export async function recallEpisodes(
   let all = loadAll()
 
   // apply filters
-  if (filter?.person) {
+  if (filter?.person && filter.person.length) {
     all = all.filter(e => e.person?.toLowerCase().includes(filter.person!.toLowerCase()))
   }
   if (filter?.type) {
@@ -278,7 +278,7 @@ export async function recallEpisodes(
   // keyword fallback
   const words = query.toLowerCase().split(/\s+/)
   const matched = [...embedded, ...unembedded].filter(e =>
-    words.some(w => e.context.toLowerCase().includes(w) || e.tags.some(t => t.toLowerCase().includes(w)))
+    words.some(w => e.context.toLowerCase().includes(w) || (e.tags ?? []).some(t => t.toLowerCase().includes(w)))
   )
   return matched.sort((a, b) => b.importance - a.importance).slice(0, topK)
 }

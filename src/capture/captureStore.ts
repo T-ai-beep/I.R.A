@@ -72,7 +72,7 @@ function inferTags(transcript: string): string[] {
   const t = transcript.toLowerCase()
   const tags: string[] = []
   if (/meeting|agenda|standup|sync|call/i.test(t))          tags.push('meeting')
-  if (/price|cost|budget|afford|deal|contract/i.test(t))    tags.push('negotiation')
+  if (/price|cost|budget|afford|deal|contract|\$/i.test(t)) tags.push('negotiation')
   if (/interview|salary|hire|position|resume/i.test(t))     tags.push('interview')
   if (/investor|fund|raise|pitch|equity/i.test(t))          tags.push('investor')
   if (/\?/.test(t))                                          tags.push('question')
