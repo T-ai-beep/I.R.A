@@ -32,6 +32,9 @@ process.on('uncaughtException', (err: any) => {
 })
 
 function getProc() {
+  if (process.env.NODE_ENV === 'test' || process.env.NO_TTS === '1') {
+    return { stdin: { write: () => {} }, killed: false } as any
+  }
   if (proc && !proc.killed) return proc
 
   proc = spawn(CONFIG.VENV_PYTHON, [SCRIPT])
@@ -77,7 +80,7 @@ export function speak(text: string): void {
 
   const payload = JSON.stringify({ text: text.trim() }) + '\n'
   try {
-    p.stdin?.write(payload, (err) => {
+    p.stdin?.write(payload, (err: NodeJS.ErrnoException | null) => {
       if (err) console.log(`[TTS] write error (no-op in test): ${err.message}`)
     })
     console.log(`[TTS] ${Date.now() - t0}ms queued — "${text.slice(0, 60)}"`)

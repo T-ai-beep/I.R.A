@@ -14,6 +14,7 @@ interface MemoryState {
   lastOffer: number | null
   lastIntent: string | null
   lastSpeaker: Turn['speaker']
+  intentAge: number
 }
 
 const state: MemoryState = {
@@ -21,6 +22,7 @@ const state: MemoryState = {
   lastOffer: null,
   lastIntent: null,
   lastSpeaker: 'unknown',
+  intentAge: 0,
 }
 
 export function extractOffer(transcript: string): number | null {
@@ -134,6 +136,33 @@ function extractSpeaker(transcript: string): Turn['speaker'] {
   return 'unknown'
 }
 
+const HIGH_SIGNAL_INTENTS = ['AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'PRICE_OBJECTION']
+
+function isContradiction(prev: string | null, next: string): boolean {
+  if (!prev) return false
+  return (
+    (prev === 'AGREEMENT' && (next === 'AUTHORITY' || next === 'STALLING')) ||
+    (prev === 'STALLING'  && next === 'AGREEMENT') ||
+    (prev === 'COMPETITOR' && next === 'AGREEMENT')
+  )
+}
+
+function updateIntent(newIntent: string): void {
+  const prev = state.lastIntent
+  const highSignal = HIGH_SIGNAL_INTENTS.includes(newIntent)
+  const contradicts = isContradiction(prev, newIntent)
+
+  if (!prev || highSignal || contradicts) {
+    // Always set: first intent, high-signal intent, or contradiction
+    state.lastIntent = newIntent
+    state.intentAge = 0
+  } else {
+    // Lower-signal, non-contradicting: still update but track age
+    state.lastIntent = newIntent
+    state.intentAge += 1
+  }
+}
+
 function purgeExpired() {
   const now = Date.now()
   state.turns = state.turns.filter(t => now - t.timestamp < MEMORY_TTL_MS)
@@ -154,7 +183,15 @@ export function remember(transcript: string): Turn {
   if (state.turns.length > MAX_TURNS) state.turns.shift()
 
   if (turn.offer !== null) state.lastOffer = turn.offer
-  if (turn.intent !== null) state.lastIntent = turn.intent
+
+  if (turn.intent !== null) {
+    // New intent detected — apply override logic
+    updateIntent(turn.intent)
+  } else {
+    // Null intent turn — age the existing intent but never clear it
+    state.intentAge += 1
+  }
+
   if (turn.speaker !== 'unknown') state.lastSpeaker = turn.speaker
 
   console.log(`[MEM] intent=${turn.intent ?? 'none'} offer=${turn.offer ?? 'none'} speaker=${turn.speaker}`)
@@ -182,4 +219,5 @@ export function clearMemory() {
   state.lastOffer = null
   state.lastIntent = null
   state.lastSpeaker = 'unknown'
+  state.intentAge = 0
 }
