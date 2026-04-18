@@ -1,4 +1,5 @@
 import { CONFIG } from '../config.js'
+import { getCachedEmbed, setCachedEmbed, getCacheStats } from "../pipeline/embedCache.js"
 
 interface Example {
   text: string
@@ -111,14 +112,26 @@ const EXAMPLES: Example[] = [
   { text: "what are my goals", action: "ARIA_QUERY" },
 ]
 
+// ── Embed helper with LRU cache ───────────────────────────────────────────
+
 async function embed(text: string): Promise<number[]> {
+  // Check cache first — O(1), ~0ms
+  const cached = getCachedEmbed(text)
+  if (cached) {
+    return cached
+  }
+
   const res = await fetch(`${CONFIG.OLLAMA_URL.replace('/api/chat', '/api/embed')}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'nomic-embed-text', input: text }),
   })
   const data = await res.json() as { embeddings: number[][] }
-  return data.embeddings[0]
+  const vec = data.embeddings[0]
+
+  // Store in cache for future hits
+  setCachedEmbed(text, vec)
+  return vec
 }
 
 function cosine(a: number[], b: number[]): number {
@@ -140,7 +153,8 @@ export async function warmupEmbeddings(): Promise<void> {
     ex.embedding = await embed(ex.text)
   }
   warmedUp = true
-  console.log(`[EMBED] ready — ${EXAMPLES.length} examples loaded`)
+  const stats = getCacheStats()
+  console.log(`[EMBED] ready — ${EXAMPLES.length} examples loaded — cache ${stats.size}/${stats.capacity}`)
 }
 
 export async function matchEmbedding(
@@ -150,7 +164,10 @@ export async function matchEmbedding(
   if (!warmedUp) await warmupEmbeddings()
 
   const t0 = Date.now()
+
+  // embed() now checks LRU cache first — repeated transcripts pay ~0ms
   const queryEmbed = await embed(transcript)
+  const cacheStats = getCacheStats()
 
   let best: { action: string; score: number } | null = null
 
@@ -162,7 +179,7 @@ export async function matchEmbedding(
     }
   }
 
-  console.log(`[EMBED] ${Date.now() - t0}ms — best: "${best?.action}" @ ${best?.score.toFixed(3)}`)
+  console.log(`[EMBED] ${Date.now() - t0}ms — best: "${best?.action}" @ ${best?.score.toFixed(3)} (cache ${cacheStats.size}/${cacheStats.capacity})`)
 
   if (!best || best.score < threshold) return null
   return best
