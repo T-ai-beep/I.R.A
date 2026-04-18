@@ -306,6 +306,7 @@ function processSideEffects(
 //   [4] Forced fallback  (money events)      ~0ms
 
 export async function decide(transcript: string): Promise<string | null> {
+  if (!transcript || !transcript.trim()) return null
   const t0       = Date.now()
   const deadline = t0 + CONFIG.LATENCY_BUDGET_MS
 
@@ -391,7 +392,10 @@ export async function decide(transcript: string): Promise<string | null> {
 
   // ── [2] Embedding (LRU cache — repeated transcripts pay ~0ms) ────────
   if (Date.now() < deadline - 10) {
-    const embedMatch = await matchEmbedding(transcript)
+    const embedMatch = await Promise.race([
+      matchEmbedding(transcript),
+      new Promise<null>(r => setTimeout(() => r(null), 150))
+    ])
     if (embedMatch) {
       const isNegotiationLabel = /hold number|frame breaking|fear signal|pain unaddressed|deal closing/i.test(embedMatch.action)
       if (modeAtCall === 'negotiation' || !isNegotiationLabel) {

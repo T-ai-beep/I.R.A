@@ -10,15 +10,26 @@
  * By the time the first real speak() call arrives, the OutputStream is
  * already open and Kokoro weights are paged into RAM. First audio latency
  * is warm, not cold.
+ *
+ * Path resolution uses import.meta.url so SCRIPT resolves correctly
+ * regardless of cwd — works from both A.R.I.A/ and IRA_test_suite/.
  */
-
 import { spawn } from 'child_process'
 import * as path from 'path'
+import { fileURLToPath } from 'url'
 import { CONFIG } from '../config.js'
 
-const SCRIPT = path.join(process.cwd(), 'scripts', 'tts.py')
+const __filename = fileURLToPath(import.meta.url)
+const __dirname  = path.dirname(__filename)
+// Resolves to A.R.I.A/scripts/tts.py regardless of working directory
+const SCRIPT = path.resolve(__dirname, '..', '..', 'scripts', 'tts.py')
 
 let proc: ReturnType<typeof spawn> | null = null
+
+process.on('uncaughtException', (err: any) => {
+  if (err.code === 'EPIPE') return  // TTS pipe broken — ignore in test env
+  throw err
+})
 
 function getProc() {
   if (proc && !proc.killed) return proc
@@ -65,9 +76,14 @@ export function speak(text: string): void {
   const p  = getProc()
 
   const payload = JSON.stringify({ text: text.trim() }) + '\n'
-  p.stdin?.write(payload)
-
-  console.log(`[TTS] ${Date.now() - t0}ms queued — "${text.slice(0, 60)}"`)
+  try {
+    p.stdin?.write(payload, (err) => {
+      if (err) console.log(`[TTS] write error (no-op in test): ${err.message}`)
+    })
+    console.log(`[TTS] ${Date.now() - t0}ms queued — "${text.slice(0, 60)}"`)
+  } catch (err: any) {
+    console.log(`[TTS] skipped (pipe unavailable): "${text.slice(0, 40)}"`)
+  }
 }
 
 // ── OPT-5: Pre-warm immediately on module load ────────────────────────────

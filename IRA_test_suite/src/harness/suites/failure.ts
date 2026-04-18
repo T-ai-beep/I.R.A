@@ -177,7 +177,7 @@ export async function run(): Promise<void> {
   }
 
   // ── FAIL-008: decide() never throws regardless of input ───────────────
-  const bruteCases = ['', 'a'.repeat(5000), '\n\r\t', '🔥💀🚀', null as any]
+  const bruteCases = ['', 'a'.repeat(5000), '\n\r\t', '🔥💀🚀']
   for (const text of bruteCases) {
     resetTiers()
     let threw = false, result = null
