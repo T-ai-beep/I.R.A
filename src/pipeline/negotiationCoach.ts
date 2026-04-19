@@ -9,18 +9,11 @@
  *   3 Anchor   — reinforce ROI / downside of not acting
  *   4 Close    — push toward decision or concrete next step
  *
- * Rules enforced (not delegated to caller):
- *   - Response history window (last 3): no line reused within window
- *   - Level advances every turn — never stays at 0 forever
- *   - Same intent with no new info > RECLASSIFY_AFTER turns → HIDDEN_OBJECTION
- *   - No signal on unknown + no prior state → null (strategic WAIT)
- *   - After MAX_RESISTANCE non-answers at level 4 → disqualify
- *   - Max 12 words per output enforced at output boundary
- *
- * Integration:
- *   import { coach, resetCoach } from './negotiationCoach.js'
- *   const response = coach(transcript)
- *   if (response) speak(response)   // null = strategic silence, caller must not speak
+ * CoachContext (new):
+ *   event      — pre-classified EventType from decision.ts (skips duplicate classification)
+ *   lastIntent — from memory.ts (detects cross-turn loops and reversals)
+ *   lastOffer  — from memory.ts (informs anchor and price responses)
+ *   trajectory — from steering.ts (pre-escalates on predicted stall/lowball)
  */
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -32,20 +25,29 @@ export type ObjectionType =
   | 'VALUE_DOUBT'
   | 'COMPETITOR'
   | 'AGREEMENT'
-  | 'HIDDEN_OBJECTION'  // reclassified: repeated objection with no new info
+  | 'HIDDEN_OBJECTION'
   | 'UNKNOWN'
 
 export type LadderLevel = 0 | 1 | 2 | 3 | 4
 export type LadderLevelName = 'Probe' | 'Isolate' | 'Reframe' | 'Anchor' | 'Close'
 
+// ── NEW: Context fed from decide() ────────────────────────────────────────
+
+export interface CoachContext {
+  event:       string | null   // EventType from classifyEvent()
+  lastIntent:  string | null   // from memory.ts — cross-turn loop detection
+  lastOffer:   number | null   // from memory.ts — price anchoring
+  trajectory:  string | null   // from steering.ts — predicted direction
+}
+
 export interface CoachTurn {
   input:           string
-  response:        string | null  // null = strategic WAIT — caller must not speak
+  response:        string | null
   wait:            boolean
   level:           LadderLevel
   levelName:       LadderLevelName
   objectionType:   ObjectionType
-  reclassified:    boolean        // true = intent shifted to HIDDEN_OBJECTION
+  reclassified:    boolean
   userAnswered:    boolean
   escalated:       boolean
   disqualified:    boolean
@@ -56,10 +58,10 @@ export interface CoachState {
   level:            LadderLevel
   objectionType:    ObjectionType | null
   lastQuestion:     string | null
-  recentResponses:  string[]       // sliding window — blocks reuse within HISTORY_WINDOW turns
+  recentResponses:  string[]
   answeredLast:     boolean
   resistanceCount:  number
-  sameIntentTurns:  number         // consecutive turns same intent, no new info
+  sameIntentTurns:  number
   disqualified:     boolean
   turnCount:        number
 }
@@ -68,8 +70,20 @@ export interface CoachState {
 
 const MAX_RESISTANCE   = 3
 const HISTORY_WINDOW   = 3
-const RECLASSIFY_AFTER = 2  // same intent + no new info → reclassify to HIDDEN_OBJECTION
+const RECLASSIFY_AFTER = 2
 const MAX_WORDS        = 12
+
+// ── Event → ObjectionType mapping ─────────────────────────────────────────
+// Allows the coach to use the pre-classified event from decision.ts
+// instead of re-running its own detectObjectionType() — single source of truth.
+
+const EVENT_TO_OBJECTION: Partial<Record<string, ObjectionType>> = {
+  PRICE_OBJECTION: 'PRICE_OBJECTION',
+  STALLING:        'STALLING',
+  AUTHORITY:       'AUTHORITY',
+  COMPETITOR:      'COMPETITOR',
+  AGREEMENT:       'AGREEMENT',
+}
 
 // ── Response banks ─────────────────────────────────────────────────────────
 
@@ -290,6 +304,7 @@ const LEVEL_NAMES: Record<LadderLevel, LadderLevelName> = {
 }
 
 // ── Intent detection ───────────────────────────────────────────────────────
+// Used as fallback when no CoachContext.event is provided.
 
 const INTENT_PATTERNS: Record<Exclude<ObjectionType, 'UNKNOWN' | 'HIDDEN_OBJECTION'>, RegExp> = {
   AGREEMENT:       /move forward|let'?s do it|we'?re? (in|ready)|i'?ll take it|ready to sign|close this|when do we start|send me the contract|yeah.*i am in|sounds good.*let'?s/i,
@@ -321,6 +336,57 @@ export function userAnswered(transcript: string): boolean {
   return true
 }
 
+// ── Reversal detection ─────────────────────────────────────────────────────
+// Uses lastIntent from memory to detect cross-turn contradictions.
+
+function detectCrossTurnReversal(
+  detected: ObjectionType,
+  lastIntent: string | null
+): boolean {
+  if (!lastIntent) return false
+  const reversals: Partial<Record<string, ObjectionType[]>> = {
+    'AGREEMENT': ['PRICE_OBJECTION', 'STALLING', 'AUTHORITY'],
+    'STALLING':  ['AGREEMENT'],
+    'COMPETITOR': ['AGREEMENT'],
+  }
+  return reversals[lastIntent]?.includes(detected) ?? false
+}
+
+// ── Trajectory → escalation boost ─────────────────────────────────────────
+// If steering already predicts a stall or lowball, start one level higher.
+
+function trajectoryLevelBoost(trajectory: string | null): number {
+  if (!trajectory) return 0
+  if (trajectory === 'stall' || trajectory === 'lowball') return 1
+  return 0
+}
+
+// ── Offer-aware response selection ────────────────────────────────────────
+// When lastOffer is known, prefer responses that reference the number.
+
+function pickOfferAwareVariant(
+  bank: ObjectionBank,
+  level: LadderLevel,
+  recentResponses: string[],
+  lastOffer: number | null
+): string {
+  const variants = bank[level] as string[]
+
+  // If we have an offer and the variant mentions a dollar sign, prefer it
+  if (lastOffer !== null) {
+    const offerVariants = variants.filter(
+      v => v.includes('$') && !recentResponses.includes(v)
+    )
+    if (offerVariants.length) {
+      return offerVariants[Math.floor(Math.random() * offerVariants.length)]
+    }
+  }
+
+  const candidates = variants.filter(v => !recentResponses.includes(v))
+  const pool = candidates.length > 0 ? candidates : variants
+  return pool[Math.floor(Math.random() * pool.length)]
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function enforceWordLimit(text: string): string {
@@ -331,13 +397,6 @@ function enforceWordLimit(text: string): string {
 function pushHistory(window: string[], response: string): string[] {
   const updated = [...window, response]
   return updated.length > HISTORY_WINDOW ? updated.slice(-HISTORY_WINDOW) : updated
-}
-
-function pickVariant(bank: ObjectionBank, level: LadderLevel, recentResponses: string[]): string {
-  const variants  = bank[level] as string[]
-  const candidates = variants.filter(v => !recentResponses.includes(v))
-  const pool      = candidates.length > 0 ? candidates : variants
-  return pool[Math.floor(Math.random() * pool.length)]
 }
 
 // ── CoachSession ───────────────────────────────────────────────────────────
@@ -367,34 +426,55 @@ export class CoachSession {
     this.state = this.freshState()
   }
 
-  process(transcript: string): CoachTurn {
+  // ── Main process — now accepts optional CoachContext ───────────────────
+
+  process(transcript: string, ctx?: CoachContext): CoachTurn {
     const s = this.state
     s.turnCount++
 
-    // ── Already disqualified ───────────────────────────────────────────────
+    // ── Already disqualified ─────────────────────────────────────────────
     if (s.disqualified) {
       const line = DISQUALIFY_LINES[s.turnCount % DISQUALIFY_LINES.length]
       return this.buildTurn(transcript, line, false, false, false, false)
     }
 
-    const detected   = detectObjectionType(transcript)
-    const answered   = userAnswered(transcript)
-    let escalated    = false
-    let reclassified = false
+    // ── Intent resolution: context-first, fallback to local detection ────
+    // If we have a pre-classified event from decide(), use it directly.
+    // This eliminates the duplicate classification between coach and decision.ts.
+    let detected: ObjectionType
 
-    // ── Intent routing ─────────────────────────────────────────────────────
-    if (detected !== 'UNKNOWN') {
+    if (ctx?.event && EVENT_TO_OBJECTION[ctx.event]) {
+      detected = EVENT_TO_OBJECTION[ctx.event]!
+    } else {
+      detected = detectObjectionType(transcript)
+    }
+
+    const answered    = userAnswered(transcript)
+    let escalated     = false
+    let reclassified  = false
+
+    // ── Cross-turn reversal detection using memory.lastIntent ────────────
+    // e.g. they said "let's do it" last turn, now they're objecting on price
+    const isReversal = detectCrossTurnReversal(detected, ctx?.lastIntent ?? null)
+    if (isReversal) {
+      console.log(`[COACH] cross-turn reversal detected — ${ctx?.lastIntent} → ${detected}`)
+      // Treat reversal as a new objection type, reset ladder
+      s.objectionType   = detected
+      s.level           = 0
+      s.resistanceCount = 0
+      s.sameIntentTurns = 0
+    }
+
+    // ── Intent routing ───────────────────────────────────────────────────
+    if (detected !== 'UNKNOWN' && !isReversal) {
       if (detected !== s.objectionType) {
-        // New or different objection type — restart ladder for this type
         s.objectionType   = detected
         s.level           = 0
         s.resistanceCount = 0
         s.sameIntentTurns = 0
       } else {
-        // Same objection type repeated
         if (!answered) {
           s.sameIntentTurns++
-          // Reclassify after N stale same-intent turns → switch to HIDDEN_OBJECTION playbook
           if (s.sameIntentTurns > RECLASSIFY_AFTER && s.objectionType !== 'HIDDEN_OBJECTION') {
             console.log(`[COACH] reclassifying ${s.objectionType} → HIDDEN_OBJECTION (${s.sameIntentTurns} stale turns)`)
             s.objectionType   = 'HIDDEN_OBJECTION'
@@ -408,17 +488,20 @@ export class CoachSession {
       }
     }
 
-    // ── No signal at all ───────────────────────────────────────────────────
-    // No detectable intent AND no prior conversation state → strategic silence.
-    // This prevents firing noise into dead air.
+    // ── No signal — strategic WAIT ───────────────────────────────────────
     if (detected === 'UNKNOWN' && !s.objectionType) {
       console.log('[COACH] no signal, no prior state — strategic WAIT')
       return this.buildTurn(transcript, null, true, answered, false, false)
     }
 
-    // ── Ladder advancement ─────────────────────────────────────────────────
-    // Only advances if we have already asked a question (lastQuestion set).
-    // First turn stays at level 0 — no advancement without a prior question.
+    // ── Trajectory-based pre-escalation ──────────────────────────────────
+    // If steering predicts stall/lowball, bump starting level by 1
+    // Only applies on the FIRST turn of a new objection type
+    const trajectoryBoost = (s.lastQuestion === null)
+      ? trajectoryLevelBoost(ctx?.trajectory ?? null)
+      : 0
+
+    // ── Ladder advancement ───────────────────────────────────────────────
     if (s.lastQuestion !== null) {
       s.answeredLast = answered
       if (answered) {
@@ -434,18 +517,25 @@ export class CoachSession {
           s.disqualified = true
         }
       }
+    } else if (trajectoryBoost > 0) {
+      // First turn: apply trajectory boost
+      s.level = Math.min(trajectoryBoost, 4) as LadderLevel
+      console.log(`[COACH] trajectory boost → starting at level ${s.level}`)
     }
 
-    // ── Ensure type is set ─────────────────────────────────────────────────
+    // ── Ensure type is set ───────────────────────────────────────────────
     if (!s.objectionType) s.objectionType = 'PRICE_OBJECTION'
 
-    // ── Build response ─────────────────────────────────────────────────────
+    // ── Build response ───────────────────────────────────────────────────
     let response: string
     if (s.disqualified) {
       response = DISQUALIFY_LINES[s.resistanceCount % DISQUALIFY_LINES.length]
     } else {
       const bank = RESPONSES[s.objectionType as Exclude<ObjectionType, 'UNKNOWN'>]
-      response   = enforceWordLimit(pickVariant(bank, s.level, s.recentResponses))
+      // Use offer-aware selection when lastOffer is available
+      response = enforceWordLimit(
+        pickOfferAwareVariant(bank, s.level, s.recentResponses, ctx?.lastOffer ?? null)
+      )
     }
 
     s.lastQuestion    = response
@@ -479,7 +569,7 @@ export class CoachSession {
   }
 }
 
-// ── Singleton (one session per conversation) ───────────────────────────────
+// ── Singleton ──────────────────────────────────────────────────────────────
 
 let _globalSession: CoachSession | null = null
 
@@ -493,13 +583,11 @@ export function resetCoach(): void {
 }
 
 // ── Drop-in for decision.ts ────────────────────────────────────────────────
-// Returns string to speak, or null for strategic silence.
-// Caller MUST check for null and NOT call speak() when null.
 
-export function coach(transcript: string): string | null {
+export function coach(transcript: string, ctx?: CoachContext): string | null {
   if (!transcript.trim()) return null
   const session = getCoachSession()
-  const turn    = session.process(transcript)
+  const turn    = session.process(transcript, ctx)
 
   console.log(
     `[COACH] L${turn.level}/${turn.levelName}` +

@@ -1,3 +1,22 @@
+/**
+ * decision.ts — ARIA decision pipeline (refactored)
+ *
+ * Architecture: coach is the single decision authority for negotiation.
+ *
+ * Flow:
+ *   transcript
+ *     → remember()              — memory update + intent/offer extraction
+ *     → classifyEvent()         — single source of truth for event type
+ *     → steer()                 — trajectory prediction (feeds coach context)
+ *     → processSideEffects()    — tasks, follow-ups, people, episodic (async)
+ *     → [negotiation] CoachSession.process(transcript, ctx)
+ *         if response           → speak + log + return
+ *         if wait + forced      → getForcedFallback()
+ *         if wait + high-impact → matchEmbedding() → llmFallback()
+ *         if wait + low-impact  → steering.preloadMessage → null
+ *     → [other modes] matchRule() → llmFallback()
+ */
+
 import { CONFIG } from '../config.js'
 import { matchEmbedding } from './embeddings.js'
 import { matchRule } from './rules.js'
@@ -6,7 +25,6 @@ import { extractTaskFromTranscript, addTask, getTaskContext } from './tasks.js'
 import { updatePeopleFromTranscript, getPeopleContext } from './people.js'
 import { detectFollowUp, createFollowUp, getFollowUpContext } from './followup.js'
 import { logDecision, getPatternContext } from './decisionLog.js'
-import { selectBestAction, ActionCandidate, BestAction } from './actionSelector.js'
 import { recordSuccess, recordIgnored } from './adaptiveWeights.js'
 import { steer, getTrajectoryContext } from './steering.js'
 import { storeEpisode, getEpisodicContext } from '../pipeline/epsodic.js'
@@ -14,7 +32,7 @@ import { getIdentityContext, getHighImportancePeople } from './identityScore.js'
 import { createPressureItem } from './pressure.js'
 import { FORCED_RESPONSE_EVENTS, getForcedFallback } from './playbook.js'
 import { speak } from './tts.js'
-import { getCoachSession } from './negotiationCoach.js'
+import { getCoachSession, CoachContext } from './negotiationCoach.js'
 
 export type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -31,7 +49,7 @@ export type EventType =
 
 let currentMode: Mode = 'negotiation'
 
-// ── Dedup guard — never speak the same line twice in a row ────────────────
+// ── Dedup guard ───────────────────────────────────────────────────────────
 let lastSpoken: string | null = null
 
 export function setMode(mode: Mode): void {
@@ -43,9 +61,11 @@ export function getMode(): Mode {
   return currentMode
 }
 
-export { classifyEvent }
+// ── Event classification — single source of truth ─────────────────────────
+// Runs once per transcript. Result feeds coach, memory context, and LLM.
+// Eliminates the duplicate classification between decision.ts and memory.ts.
 
-function classifyEvent(transcript: string): EventType {
+export function classifyEvent(transcript: string): EventType {
   const t = transcript.toLowerCase()
 
   if (
@@ -94,54 +114,6 @@ function classifyEvent(transcript: string): EventType {
   return 'UNKNOWN'
 }
 
-// ── Reversal detection ────────────────────────────────────────────────────
-
-const REVERSAL_PATTERN = /\b(actually|wait|hold on|let me check|never mind|on second thought)\b/i
-
-function detectReversal(transcript: string): boolean {
-  return REVERSAL_PATTERN.test(transcript)
-}
-
-// ── Strategic WAIT gate ───────────────────────────────────────────────────
-
-function shouldWait(transcript: string, event: EventType): boolean {
-  const wordCount = transcript.trim().split(/\s+/).length
-  if (wordCount <= 2 && event === 'UNKNOWN') return true
-  if (detectReversal(transcript) && event === 'UNKNOWN') return true
-  return false
-}
-
-// ── Prior-intent contradiction check ─────────────────────────────────────
-
-const CONTRADICTING_PRIOR: Partial<Record<string, EventType[]>> = {
-  'AGREEMENT': ['PRICE_OBJECTION', 'STALLING', 'AUTHORITY'],
-  'STALLING':  ['AGREEMENT'],
-}
-
-function priorContradicts(event: EventType): boolean {
-  const ctx = getContext()
-  if (!ctx.lastIntent) return false
-  return CONTRADICTING_PRIOR[ctx.lastIntent]?.includes(event) ?? false
-}
-
-// ── Compound signal detection ─────────────────────────────────────────────
-
-function detectCompoundSignal(transcript: string): ActionCandidate | null {
-  const isPriceChallenge = /beat|match|percent.*lower|come down|beat their price/i.test(transcript)
-  const ctx = getContext()
-  const priorWasCompetitor = ctx.lastIntent === 'COMPETITOR'
-
-  if (isPriceChallenge && priorWasCompetitor) {
-    const fallback = getForcedFallback('PRICE_OBJECTION')
-    if (fallback) {
-      console.log('[COMPOUND] price challenge after competitor — forcing discount response')
-      return { command: 'PUSH', message: fallback, source: 'rule', score: 0.95 }
-    }
-  }
-
-  return null
-}
-
 const HIGH_IMPACT: EventType[] = [
   'PRICE_OBJECTION', 'AUTHORITY', 'COMPETITOR', 'AGREEMENT', 'QUESTION', 'OFFER_DISCUSS',
 ]
@@ -150,145 +122,18 @@ function isHighImpact(event: EventType): boolean {
   return HIGH_IMPACT.includes(event)
 }
 
-const FAST_PATH_THRESHOLD = 0.90
-
-// ── OPT-6: Static system prompt — Ollama reuses KV cache across calls ─────
-// Never put dynamic content here. Everything dynamic goes in the user message.
-const TIGHT_PROMPT = `You are ARIA, a real-time decision coach in an earpiece.
-Output ONE line only: ACTION — phrase
-ACTION must be one of: Reject Accept Ask Push Wait Challenge Clarify Delay Anchor Exit
-phrase is 2–3 words MAX. Total output: 4–6 words.
-Examples: "Anchor — hold the number" / "Ask — what changed" / "Push — close now"
-If nothing actionable: PASS
-No punctuation. No explanation. No quotes.`
-
 // ── Dedup helper ──────────────────────────────────────────────────────────
+
 function speakDeduped(message: string): void {
   if (message === lastSpoken) {
-    console.log(`[DEDUP] identical consecutive output suppressed — "${message}"`)
+    console.log(`[DEDUP] suppressed — "${message}"`)
     return
   }
   lastSpoken = message
   speak(message)
 }
 
-async function llmFallbackStreaming(
-  transcript: string,
-  event: EventType,
-  deadline: number
-): Promise<string | null> {
-  const ctx = getContext()
-  const contextLine = ctx.lastOffer
-    ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
-    : ''
-
-  const taskCtx     = getTaskContext()
-  const followUpCtx = getFollowUpContext()
-  const patternCtx  = getPatternContext()
-  const extraCtx    = [taskCtx, followUpCtx, patternCtx].filter(Boolean).join('\n')
-
-  const remaining = deadline - Date.now()
-  if (remaining <= 50) {
-    console.log('[LLM] skipped — latency budget exhausted')
-    return null
-  }
-
-  const t0 = Date.now()
-
-  try {
-    const res = await fetch(CONFIG.OLLAMA_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: CONFIG.OLLAMA_MODEL,
-        keep_alive: '10m',  // OPT-6: keep model loaded, reuse KV cache
-        messages: [
-          // OPT-6: system message is static — Ollama caches this
-          { role: 'system', content: TIGHT_PROMPT },
-          {
-            // OPT-6: all dynamic content lives here only
-            role: 'user',
-            content: `Event: ${event}\n${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nTranscript: "${transcript}"`,
-          },
-        ],
-        stream: true,
-      }),
-      signal: AbortSignal.timeout(remaining),
-    })
-
-    if (!res.body) return null
-
-    const reader  = res.body.getReader()
-    const decoder = new TextDecoder()
-    const CHUNK_WORDS = 3
-
-    let wordBuffer  = ''
-    let fullOutput  = ''
-    let firstSpeak  = true
-    let firstToken  = true
-
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-
-      const raw = decoder.decode(value, { stream: true })
-
-      for (const line of raw.split('\n')) {
-        const trimmed = line.trim()
-        if (!trimmed) continue
-
-        let parsed: { message?: { content?: string }; done?: boolean }
-        try { parsed = JSON.parse(trimmed) } catch { continue }
-        if (parsed.done) break
-
-        const token = parsed.message?.content ?? ''
-        if (!token) continue
-
-        if (firstToken) {
-          console.log(`[LLM-STREAM] first token @ ${Date.now() - t0}ms`)
-          firstToken = false
-        }
-
-        wordBuffer  += token
-        fullOutput  += token
-
-        const words = wordBuffer.trim().split(/\s+/).filter(Boolean)
-        if (words.length >= CHUNK_WORDS) {
-          const chunk = wordBuffer.trim()
-          if (chunk && chunk.toUpperCase() !== 'PASS') {
-            if (firstSpeak) {
-              console.log(`[LLM-STREAM] first speak() @ ${Date.now() - t0}ms`)
-              firstSpeak = false
-            }
-            speakDeduped(chunk)
-          }
-          wordBuffer = ''
-        }
-      }
-    }
-
-    const tail = wordBuffer.trim()
-    if (tail && tail.toUpperCase() !== 'PASS' && tail.length > 1) {
-      speakDeduped(tail)
-    }
-
-    const raw = fullOutput.trim().replace(/['"`.]/g, '').trim()
-    console.log(`[LLM-STREAM] total=${Date.now() - t0}ms — "${raw}"`)
-
-    if (!raw || raw.toUpperCase() === 'PASS') return null
-
-    const actions = ['Reject','Accept','Ask','Push','Wait','Challenge','Clarify','Delay','Anchor','Exit']
-    if (!actions.some(a => raw.startsWith(a))) return null
-
-    return raw.split(/\s+/).slice(0, 6).join(' ')
-
-  } catch (e) {
-    console.log('[LLM-STREAM] error/timeout — fast path only')
-    return null
-  }
-}
-
-// ── Side effects ──────────────────────────────────────────────────────────
+// ── Side effects (async, non-blocking) ────────────────────────────────────
 
 function processSideEffects(
   transcript: string,
@@ -326,184 +171,284 @@ function processSideEffects(
   })
 }
 
-// ── decide() ──────────────────────────────────────────────────────────────
+// ── LLM fallback — last resort only ──────────────────────────────────────
+// Called when coach is waiting on a high-impact event and embedding missed.
+// Includes full context: tasks, follow-ups, patterns.
+
+const TIGHT_PROMPT = `You are ARIA, a real-time decision coach in an earpiece.
+Output ONE line only: ACTION — phrase
+ACTION must be one of: Reject Accept Ask Push Wait Challenge Clarify Delay Anchor Exit
+phrase is 2–3 words MAX. Total output: 4–6 words.
+Examples: "Anchor — hold the number" / "Ask — what changed" / "Push — close now"
+If nothing actionable: PASS
+No punctuation. No explanation. No quotes.`
+
+async function llmFallback(
+  transcript: string,
+  event: EventType,
+  deadline: number
+): Promise<string | null> {
+  const remaining = deadline - Date.now()
+  if (remaining <= 50) {
+    console.log('[LLM] skipped — latency budget exhausted')
+    return null
+  }
+
+  const ctx = getContext()
+  const contextLine = ctx.lastOffer
+    ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
+    : ''
+
+  // Full context passed to LLM — tasks, follow-ups, patterns
+  const taskCtx     = getTaskContext()
+  const followUpCtx = getFollowUpContext()
+  const patternCtx  = getPatternContext()
+  const extraCtx    = [taskCtx, followUpCtx, patternCtx].filter(Boolean).join('\n')
+
+  const t0 = Date.now()
+
+  try {
+    const res = await fetch(CONFIG.OLLAMA_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: CONFIG.OLLAMA_MODEL,
+        keep_alive: '10m',
+        messages: [
+          { role: 'system', content: TIGHT_PROMPT },
+          {
+            role: 'user',
+            content: `Event: ${event}\n${contextLine}${extraCtx ? '\n' + extraCtx : ''}\nTranscript: "${transcript}"`,
+          },
+        ],
+        stream: true,
+      }),
+      signal: AbortSignal.timeout(remaining),
+    })
+
+    if (!res.body) return null
+
+    const reader  = res.body.getReader()
+    const decoder = new TextDecoder()
+    const CHUNK_WORDS = 3
+
+    let wordBuffer = ''
+    let fullOutput = ''
+    let firstSpeak = true
+    let firstToken = true
+
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) break
+
+      const raw = decoder.decode(value, { stream: true })
+
+      for (const line of raw.split('\n')) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
+
+        let parsed: { message?: { content?: string }; done?: boolean }
+        try { parsed = JSON.parse(trimmed) } catch { continue }
+        if (parsed.done) break
+
+        const token = parsed.message?.content ?? ''
+        if (!token) continue
+
+        if (firstToken) {
+          console.log(`[LLM] first token @ ${Date.now() - t0}ms`)
+          firstToken = false
+        }
+
+        wordBuffer += token
+        fullOutput += token
+
+        const words = wordBuffer.trim().split(/\s+/).filter(Boolean)
+        if (words.length >= CHUNK_WORDS) {
+          const chunk = wordBuffer.trim()
+          if (chunk && chunk.toUpperCase() !== 'PASS') {
+            if (firstSpeak) {
+              console.log(`[LLM] first speak @ ${Date.now() - t0}ms`)
+              firstSpeak = false
+            }
+            speakDeduped(chunk)
+          }
+          wordBuffer = ''
+        }
+      }
+    }
+
+    const tail = wordBuffer.trim()
+    if (tail && tail.toUpperCase() !== 'PASS' && tail.length > 1) {
+      speakDeduped(tail)
+    }
+
+    const result = fullOutput.trim().replace(/['"`.]/g, '').trim()
+    console.log(`[LLM] total=${Date.now() - t0}ms — "${result}"`)
+
+    if (!result || result.toUpperCase() === 'PASS') return null
+
+    const actions = ['Reject','Accept','Ask','Push','Wait','Challenge','Clarify','Delay','Anchor','Exit']
+    if (!actions.some(a => result.startsWith(a))) return null
+
+    return result.split(/\s+/).slice(0, 6).join(' ')
+
+  } catch {
+    console.log('[LLM] timeout or error')
+    return null
+  }
+}
+
+// ── Non-negotiation modes — rules as authority ────────────────────────────
+
+async function decideNonNegotiation(
+  transcript: string,
+  event: EventType,
+  deadline: number,
+  modeAtCall: Mode,
+  person: string | null,
+  offer: number | null
+): Promise<string | null> {
+  const ruleHit = matchRule(transcript, modeAtCall)
+  if (ruleHit) {
+    console.log(`[RULE/${modeAtCall}] "${ruleHit}"`)
+    logDecision(transcript, event, ruleHit, 'rule', modeAtCall, person, offer)
+    speakDeduped(ruleHit)
+    return ruleHit
+  }
+
+  if (isHighImpact(event) && Date.now() < deadline - 200) {
+    const llmResult = await llmFallback(transcript, event, deadline)
+    if (llmResult) {
+      logDecision(transcript, event, llmResult, 'llm', modeAtCall, person, offer)
+      return llmResult
+    }
+  }
+
+  return null
+}
+
+// ── decide() — single entry point ─────────────────────────────────────────
 
 export async function decide(transcript: string): Promise<string | null> {
   if (!transcript || !transcript.trim()) return null
-  const t0       = Date.now()
-  const deadline = t0 + CONFIG.LATENCY_BUDGET_MS
 
+  const t0         = Date.now()
+  const deadline   = t0 + CONFIG.LATENCY_BUDGET_MS
   const modeAtCall = currentMode
-  const turn       = remember(transcript)
-  const event      = classifyEvent(transcript)
+
+  // ── 1. Memory update ──────────────────────────────────────────────────
+  const turn = remember(transcript)
+  const ctx  = getContext()
+
+  // ── 2. Event classification — single source of truth ─────────────────
+  const event = classifyEvent(transcript)
   console.log(`[EVENT] ${event} [MODE] ${modeAtCall}`)
 
-  const person = turn.speaker !== 'unknown'
-    ? null
-    : transcript.match(/([A-Z][a-z]{1,14})/)?.[1] ?? null
+  // ── 3. Person extraction for side effects ─────────────────────────────
+  const person = transcript.match(/([A-Z][a-z]{1,14})/)?.[1] ?? null
 
+  // ── 4. Side effects (non-blocking) ────────────────────────────────────
   processSideEffects(transcript, turn.intent, turn.offer, person)
 
-  // ── Strategic WAIT gate ───────────────────────────────────────────────
-  if (shouldWait(transcript, event)) {
-    console.log('[WAIT] strategic silence')
-    logDecision(transcript, event, 'WAIT', 'rule', modeAtCall, person, turn.offer)
-    return null
-  }
-
+  // ── 5. Trajectory prediction ──────────────────────────────────────────
   const steering = await steer(transcript, false)
-  if (steering.preloadMessage) {
-    console.log(`[STEER] preload → "${steering.preloadMessage}"`)
+
+  // ── 6. Non-negotiation modes ──────────────────────────────────────────
+  if (modeAtCall !== 'negotiation') {
+    return decideNonNegotiation(transcript, event, deadline, modeAtCall, person, turn.offer)
   }
 
-  const candidates: ActionCandidate[] = []
+  // ── 7. Build coach context ────────────────────────────────────────────
+  const coachCtx: CoachContext = {
+    event:      event,
+    lastIntent: ctx.lastIntent,
+    lastOffer:  ctx.lastOffer,
+    trajectory: steering.predictedIntent ?? null,
+  }
 
-  // ── [0] Coach — stateful brain (negotiation only) ─────────────────────
-  let coachFired = false
-  if (modeAtCall === 'negotiation') {
-    const coachTurn = getCoachSession().process(transcript)
-    if (!coachTurn.wait && coachTurn.response) {
-      candidates.push({
-        command: 'WAIT',
-        message: coachTurn.response,
-        source:  'rule',
-        score:   0.96,
-      })
-      coachFired = true
-      console.log(`[COACH] L${coachTurn.level}/${coachTurn.levelName} — "${coachTurn.response}"`)
-    } else if (coachTurn.wait) {
-      if (!FORCED_RESPONSE_EVENTS.has(event)) {
-        console.log('[COACH] strategic silence')
-        return null
-      }
+  // ── 8. Coach — single decision authority (negotiation) ────────────────
+  const coachTurn = getCoachSession().process(transcript, coachCtx)
+
+  console.log(
+    `[COACH] L${coachTurn.level}/${coachTurn.levelName}` +
+    ` type=${coachTurn.objectionType}` +
+    ` wait=${coachTurn.wait}` +
+    ` escalated=${coachTurn.escalated}` +
+    `${coachTurn.reclassified ? ' [RECLASSIFIED]' : ''}` +
+    ` — "${coachTurn.response ?? 'SILENCE'}"`
+  )
+
+  // ── 9. Coach has a response — done ───────────────────────────────────
+  if (!coachTurn.wait && coachTurn.response) {
+    const totalMs = Date.now() - t0
+    console.log(`[DECIDE] ${totalMs}ms — "${coachTurn.response}"`)
+
+    const highImportance = getHighImportancePeople(transcript)
+    if (highImportance.length) {
+      console.log(`[IDENTITY] ${highImportance[0].urgencyLabel}`)
+    }
+
+    logDecision(transcript, event, coachTurn.response, 'rule', modeAtCall, person, turn.offer)
+    speakDeduped(coachTurn.response)
+    return coachTurn.response
+  }
+
+  // ── 10. Coach is waiting — fallback chain ─────────────────────────────
+
+  // 10a. Forced events never go silent
+  if (FORCED_RESPONSE_EVENTS.has(event)) {
+    const fallback = getForcedFallback(event)
+    if (fallback) {
+      console.log(`[FORCED] ${event} — coach silent, firing fallback`)
+      logDecision(transcript, event, fallback, 'rule', modeAtCall, person, turn.offer)
+      speakDeduped(fallback)
+      return fallback
     }
   }
 
-  // ── [1] Rule engine ───────────────────────────────────────────────────
-  const ruleHit = matchRule(transcript, modeAtCall)
-  if (ruleHit) {
-    candidates.push({ command: 'WAIT', message: ruleHit, source: 'rule', score: 1.0 })
-    console.log(`[RULE] ${Date.now() - t0}ms — "${ruleHit}"`)
-  }
-
-  // ── [1b] Compound signal detection ───────────────────────────────────
-  if (!ruleHit && modeAtCall === 'negotiation') {
-    const compound = detectCompoundSignal(transcript)
-    if (compound) candidates.push(compound)
-  }
-
-  // ── FAST PATH ─────────────────────────────────────────────────────────
-  const contradicts        = priorContradicts(event)
-  const effectiveThreshold = contradicts ? FAST_PATH_THRESHOLD * 0.92 : FAST_PATH_THRESHOLD
-  const hasStrongCandidate = candidates.some(c => c.score >= effectiveThreshold)
-  const suppressAgreement  = detectReversal(transcript) && event === 'AGREEMENT'
-
-  if (hasStrongCandidate && event !== 'QUESTION' && !suppressAgreement) {
-    const best = selectBestAction(candidates, event)
-    if (best) {
-      const ms = Date.now() - t0
-      console.log(`[FAST PATH] ${ms}ms — "${best.message}"`)
-      logDecision(transcript, event, best.message, best.source, modeAtCall, person, turn.offer)
-
-      if (coachFired) {
-        const isObservational = (
-          best.message.startsWith('⚠') ||
-          /fear signal|frame breaking|pain unaddressed|buying time/i.test(best.message)
-        )
-        if (isObservational) {
-          const coachCandidate = candidates.find(c => c.score === 0.96)
-          if (coachCandidate) {
-            console.log(`[FAST PATH] coach override — dropping observational label`)
-            speakDeduped(coachCandidate.message)
-            return coachCandidate.message
-          }
-        }
-      }
-
-      speakDeduped(best.message)
-      return best.message
-    }
-  }
-
-  // ── [2] Embedding ─────────────────────────────────────────────────────
+  // 10b. Embedding — second-chance before LLM
   if (Date.now() < deadline - 10) {
     const embedMatch = await Promise.race([
       matchEmbedding(transcript),
-      new Promise<null>(r => setTimeout(() => r(null), 150))
+      new Promise<null>(r => setTimeout(() => r(null), 150)),
     ])
     if (embedMatch) {
-      const isNegotiationLabel = /hold number|frame breaking|fear signal|pain unaddressed|deal closing/i.test(embedMatch.action)
-      if (modeAtCall === 'negotiation' || !isNegotiationLabel) {
-        candidates.push({ command: 'WAIT', message: embedMatch.action, source: 'embedding', score: embedMatch.score })
-        console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
-      }
+      console.log(`[EMBED] ${Date.now() - t0}ms — "${embedMatch.action}" @ ${embedMatch.score.toFixed(3)}`)
+      logDecision(transcript, event, embedMatch.action, 'embedding', modeAtCall, person, turn.offer)
+      speakDeduped(embedMatch.action)
+      return embedMatch.action
     }
   }
 
-  // ── [3] LLM streaming ─────────────────────────────────────────────────
+  // 10c. LLM — last resort for high-impact events
   if (isHighImpact(event) && Date.now() < deadline - 200) {
-    const llmResult = await llmFallbackStreaming(transcript, event, deadline)
+    const llmResult = await llmFallback(transcript, event, deadline)
     if (llmResult) {
-      candidates.push({ command: 'WAIT', message: llmResult, source: 'llm', score: 0.7 })
-      console.log(`[LLM] ${Date.now() - t0}ms — "${llmResult}"`)
       logDecision(transcript, event, llmResult, 'llm', modeAtCall, person, turn.offer)
       return llmResult
     }
-  } else if (!isHighImpact(event) && !candidates.length) {
-    if (steering.preloadMessage) {
-      candidates.push({ command: 'WAIT', message: steering.preloadMessage, source: 'rule', score: 0.65 })
-    }
   }
 
-  // ── [4] Forced fallback ───────────────────────────────────────────────
-  if (!candidates.length && modeAtCall === 'negotiation' && FORCED_RESPONSE_EVENTS.has(event)) {
-    const fallback = getForcedFallback(event)
-    if (fallback) {
-      console.log(`[FORCED] ${event} — no candidates, firing fallback`)
-      candidates.push({ command: 'WAIT', message: fallback, source: 'rule', score: 0.60 })
-    }
+  // 10d. Steering preload — low-impact events with a predicted trajectory
+  if (!isHighImpact(event) && steering.preloadMessage) {
+    console.log(`[STEER] preload — "${steering.preloadMessage}"`)
+    logDecision(transcript, event, steering.preloadMessage, 'rule', modeAtCall, person, turn.offer)
+    speakDeduped(steering.preloadMessage)
+    return steering.preloadMessage
   }
 
-  if (!candidates.length) {
-    console.log(`[PASS] ${Date.now() - t0}ms`)
-    return null
-  }
-
-  const best: BestAction | null = selectBestAction(candidates, event)
-  if (!best) return null
-
-  // Slow path coach override
-  if (coachFired) {
-    const coachCandidate = candidates.find(c => c.score === 0.96)
-    const isObservational = (
-      best.message.startsWith('⚠') ||
-      /fear signal|frame breaking|pain unaddressed|buying time/i.test(best.message)
-    )
-    if (coachCandidate && isObservational) {
-      console.log(`[EXEC] coach override`)
-      logDecision(transcript, event, coachCandidate.message, 'rule', modeAtCall, person, turn.offer)
-      speakDeduped(coachCandidate.message)
-      return coachCandidate.message
-    }
-  }
-
-  const totalMs = Date.now() - t0
-  console.log(`[DECIDE] ${totalMs}ms — "${best.message}" urgency=${best.urgency} conf=${best.confidence}`)
-
-  const highImportance = getHighImportancePeople(transcript)
-  if (highImportance.length) {
-    console.log(`[IDENTITY] ${highImportance[0].urgencyLabel}`)
-  }
-
-  logDecision(transcript, event, best.message, best.source, modeAtCall, person, turn.offer)
-  speakDeduped(best.message)
-  return best.message
+  console.log(`[PASS] ${Date.now() - t0}ms`)
+  return null
 }
+
+// ── Outcome reporting ─────────────────────────────────────────────────────
 
 export function reportOutcome(message: string, outcome: 'success' | 'ignored' | 'lost'): void {
   if (outcome === 'success') recordSuccess(message)
   else recordIgnored(message)
 }
+
+// ── Re-exports for index.ts ───────────────────────────────────────────────
 
 export {
   getTaskContext,
