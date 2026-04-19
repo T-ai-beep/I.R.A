@@ -47,6 +47,7 @@ function cosine(a: number[], b: number[]): number {
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]
   }
+  if (na === 0 || nb === 0) return 0
   return dot / (Math.sqrt(na) * Math.sqrt(nb))
 }
 
@@ -108,7 +109,7 @@ export async function searchKB(query: string, topK = 3): Promise<KBChunk[]> {
 export function saveToHistory(entry: HistoryEntry): void {
   try {
     fs.appendFileSync(HISTORY_FILE, JSON.stringify(entry) + '\n')
-  } catch {}
+  } catch (e) { console.error('[RAG] saveToHistory failed:', e) }
 }
 
 export function loadRecentHistory(hours = 24, max = 30): HistoryEntry[] {

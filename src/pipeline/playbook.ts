@@ -81,7 +81,7 @@ function logPlayFire(fire: PlayFire) {
   ensureDir()
   try {
     fs.appendFileSync(PLAYS_FILE, JSON.stringify(fire) + '\n')
-  } catch {}
+  } catch (e) { console.error('[PLAYBOOK] logPlayFire failed:', e) }
 }
 
 // ── Escalation tier tracking ───────────────────────────────────────────────

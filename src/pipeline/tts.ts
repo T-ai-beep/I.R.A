@@ -25,6 +25,9 @@ const __dirname  = path.dirname(__filename)
 const SCRIPT = path.resolve(__dirname, '..', '..', 'scripts', 'tts.py')
 
 let proc: ReturnType<typeof spawn> | null = null
+let spawnFailed = false
+
+const NOP_PROC = { stdin: { write: () => {} }, killed: false } as any
 
 process.on('uncaughtException', (err: any) => {
   if (err.code === 'EPIPE') return  // TTS pipe broken — ignore in test env
@@ -32,8 +35,8 @@ process.on('uncaughtException', (err: any) => {
 })
 
 function getProc() {
-  if (process.env.NODE_ENV === 'test' || process.env.NO_TTS === '1') {
-    return { stdin: { write: () => {} }, killed: false } as any
+  if (process.env.NODE_ENV === 'test' || process.env.NO_TTS === '1' || spawnFailed) {
+    return NOP_PROC
   }
   if (proc && !proc.killed) return proc
 
@@ -51,6 +54,12 @@ function getProc() {
     // Forward TTS process stdout logs (TTFC timing etc)
     const msg = d.toString().trim()
     if (msg) console.log(msg)
+  })
+
+  proc.on('error', (err) => {
+    console.error('[TTS] spawn error (TTS disabled):', err.message)
+    spawnFailed = true
+    proc = null
   })
 
   proc.on('exit', (code) => {

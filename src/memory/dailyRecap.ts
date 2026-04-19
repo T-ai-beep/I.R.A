@@ -330,7 +330,7 @@ function saveRecap(recap: DailyRecap): void {
   try {
     if (!fs.existsSync(ARIA_DIR)) fs.mkdirSync(ARIA_DIR, { recursive: true })
     fs.appendFileSync(RECAPS_FILE, JSON.stringify(recap) + '\n')
-  } catch {}
+  } catch (e) { console.error('[RECAP] saveRecap failed:', e) }
 }
 
 export function loadRecaps(limit = 30): DailyRecap[] {
@@ -341,7 +341,7 @@ export function loadRecaps(limit = 30): DailyRecap[] {
       .map(l => JSON.parse(l) as DailyRecap)
       .slice(-limit)
       .reverse()
-  } catch { return [] }
+  } catch (e) { console.error('[RECAP] loadRecaps parse failed:', e); return [] }
 }
 
 export function getRecapForDate(date: string): DailyRecap | null {

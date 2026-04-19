@@ -1,8 +1,14 @@
+import path from 'path'
+import { fileURLToPath } from 'url'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+const ROOT = path.resolve(__dirname, '..')
+
 export const CONFIG = {
-  // Paths
-  WHISPER_CLI: '/Users/tanayshah/A.R.I.A/whisper.cpp/build/bin/whisper-cli',
-  WHISPER_MODEL: '/Users/tanayshah/A.R.I.A/whisper.cpp/models/ggml-tiny.en.bin',
-  VENV_PYTHON: '/Users/tanayshah/A.R.I.A/.venv/bin/python3',
+  // Paths — override via env vars or fall back to project-relative defaults
+  WHISPER_CLI:   process.env.WHISPER_CLI   ?? path.join(ROOT, 'whisper.cpp/build/bin/whisper-cli'),
+  WHISPER_MODEL: process.env.WHISPER_MODEL ?? path.join(ROOT, 'whisper.cpp/models/ggml-tiny.en.bin'),
+  VENV_PYTHON:   process.env.VENV_PYTHON   ?? path.join(ROOT, '.venv/bin/python3'),
 
   // Audio
   SAMPLE_RATE: 16000,

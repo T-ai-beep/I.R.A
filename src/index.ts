@@ -41,7 +41,7 @@ async function init() {
   const { loadKnowledgeBase, ragQuery, saveToHistory } = await import('./pipeline/rag.js')
   const { getDueItems, getForcedItems, fireItem } = await import('./pipeline/pressure.js')
   const { getSessionManager } = await import('./pipeline/session.js')
-  const { VAD, SpeechEndPayload, SpeechChunkPayload } = await import('./audio/vad.js') as any
+  const { VAD } = await import('./audio/vad.js')
 
   type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -61,12 +61,15 @@ async function init() {
       ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
       : ctx.lastIntent ? `Last intent: ${ctx.lastIntent}.` : ''
 
-    const ragContext    = await ragQuery(transcript, { useWeb: true, useHistory: true, useKB: true })
-    const ragLine       = ragContext ? `\n\nContext:\n${ragContext}` : ''
-    const sessionCtx    = sessionMgr.getSessionContext()
-    const leverageLine  = [
+    const [ragContext, episodic] = await Promise.all([
+      ragQuery(transcript, { useWeb: true, useHistory: true, useKB: true }),
+      getEpisodicContext(transcript),
+    ])
+    const ragLine      = ragContext ? `\n\nContext:\n${ragContext}` : ''
+    const sessionCtx   = sessionMgr.getSessionContext()
+    const leverageLine = [
       getTaskContext(), getFollowUpContext(), getPeopleContext(transcript),
-      getTrajectoryContext(), await getEpisodicContext(transcript),
+      getTrajectoryContext(), episodic,
       getIdentityContext(transcript), sessionCtx,
     ].filter(Boolean).join('\n\n')
 
@@ -164,18 +167,14 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     }, PRESSURE_POLL_MS)
   }
 
-  // ── Warmup ────────────────────────────────────────────────────────────────
-  console.log('[INIT] warming up whisper...')
-  await transcribe(Buffer.alloc(CONFIG.SAMPLE_RATE * 2))
-  console.log('[INIT] whisper ready')
-
-  console.log('[INIT] warming up embeddings...')
-  await warmupEmbeddings()
-  console.log('[INIT] embeddings ready')
-
-  console.log('[INIT] loading knowledge base...')
-  await loadKnowledgeBase()
-  console.log('[INIT] RAG ready')
+  // ── Warmup (parallel) ────────────────────────────────────────────────────
+  console.log('[INIT] warming up whisper, embeddings, and knowledge base in parallel...')
+  await Promise.all([
+    transcribe(Buffer.alloc(CONFIG.SAMPLE_RATE * 2)),
+    warmupEmbeddings(),
+    loadKnowledgeBase(),
+  ])
+  console.log('[INIT] all systems ready')
 
   speak('online')
 
