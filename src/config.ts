@@ -22,8 +22,25 @@ export const CONFIG = {
   MAX_OUTPUT_WORDS: 7,
   CONFIDENCE_THRESHOLD: 0.7,
   LATENCY_BUDGET_MS: 300,
+  MAX_TRANSCRIPT_CHARS: 2000,  // input cap before regex; ~300 spoken words
 
-  // LLM (disabled for now)
+  // LLM
   OLLAMA_URL: 'http://localhost:11434/api/chat',
   OLLAMA_MODEL: 'llama3.2',
+
+  // Timeouts (ms) — single source of truth for all network/IO calls
+  OLLAMA_EMBED_TIMEOUT_MS:   5_000,
+  OLLAMA_STREAM_TIMEOUT_MS: 15_000,
+  OLLAMA_SUMMARY_TIMEOUT_MS: 10_000,
+  OLLAMA_DRAFT_TIMEOUT_MS:    8_000,
+  OLLAMA_RECALL_TIMEOUT_MS:   8_000,
+  OLLAMA_STEERING_TIMEOUT_MS: 4_000,
+  OLLAMA_RECAP_TIMEOUT_MS:   15_000,
+  WEB_SEARCH_TIMEOUT_MS:      3_000,
+
+  // Session
+  SESSION_END_SILENCE_MS: 120_000,
+  MIN_SESSION_TURNS: 2,
+  MAX_SUMMARY_CHARS: 500,
+  PLAYS_RETENTION_DAYS: 30,
 } as const

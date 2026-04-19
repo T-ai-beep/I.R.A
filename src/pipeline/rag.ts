@@ -33,13 +33,19 @@ ensureDirs()
 
 // ── Embedding helper ───────────────────────────────────────────────────────
 async function embed(text: string): Promise<number[]> {
-  const res = await fetch(`${CONFIG.OLLAMA_URL.replace('/api/chat', '/api/embed')}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'nomic-embed-text', input: text }),
-  })
-  const data = await res.json() as { embeddings: number[][] }
-  return data.embeddings[0]
+  try {
+    const res = await fetch(`${CONFIG.OLLAMA_URL.replace('/api/chat', '/api/embed')}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'nomic-embed-text', input: text }),
+      signal: AbortSignal.timeout(CONFIG.OLLAMA_EMBED_TIMEOUT_MS),
+    })
+    const data = await res.json() as { embeddings: number[][] }
+    return data.embeddings[0] ?? []
+  } catch (e) {
+    console.error('[RAG] embed failed:', e)
+    return []
+  }
 }
 
 function cosine(a: number[], b: number[]): number {
@@ -77,7 +83,11 @@ export async function loadKnowledgeBase(): Promise<void> {
   if (kbLoaded) return
   if (!fs.existsSync(KB_DIR)) return
 
-  const files = fs.readdirSync(KB_DIR).filter(f => f.endsWith('.txt') || f.endsWith('.md'))
+  const files = fs.readdirSync(KB_DIR).filter(f => {
+    // Reject any entry that contains a path separator — prevents traversal
+    const base = path.basename(f)
+    return base === f && (f.endsWith('.txt') || f.endsWith('.md'))
+  })
   console.log(`[RAG] loading ${files.length} knowledge file(s)...`)
 
   for (const file of files) {
@@ -121,7 +131,8 @@ export function loadRecentHistory(hours = 24, max = 30): HistoryEntry[] {
       .map(l => JSON.parse(l) as HistoryEntry)
       .filter(e => e.ts > cutoff)
       .slice(-max)
-  } catch {
+  } catch (e) {
+    console.error('[RAG] loadRecentHistory failed:', e)
     return []
   }
 }
@@ -130,7 +141,7 @@ export function loadRecentHistory(hours = 24, max = 30): HistoryEntry[] {
 export async function webSearch(query: string): Promise<string | null> {
   try {
     const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`
-    const res = await fetch(url, { signal: AbortSignal.timeout(3000) })
+    const res = await fetch(url, { signal: AbortSignal.timeout(CONFIG.WEB_SEARCH_TIMEOUT_MS) })
     const data = await res.json() as {
       AbstractText?: string
       Answer?: string
@@ -144,7 +155,8 @@ export async function webSearch(query: string): Promise<string | null> {
     if (topics?.length) return topics.join(' | ').slice(0, 400)
 
     return null
-  } catch {
+  } catch (e) {
+    console.error('[RAG] webSearch failed:', e)
     return null
   }
 }
@@ -193,7 +205,10 @@ export async function ragQuery(
 
 // ── Add a note to knowledge base ──────────────────────────────────────────
 export async function addNote(text: string, filename?: string): Promise<void> {
-  const name = filename ?? `note_${Date.now()}.txt`
+  const rawName = filename ?? `note_${Date.now()}.txt`
+  // Prevent path traversal: reject filenames that contain directory separators
+  const name = path.basename(rawName)
+  if (name !== rawName) throw new Error(`[RAG] addNote: invalid filename "${rawName}"`)
   const filepath = path.join(KB_DIR, name)
   fs.writeFileSync(filepath, text)
 

@@ -50,6 +50,9 @@ function pStats(values: number[]) {
 
 async function measureRules(transcript: string, mode: string, trials = 50): Promise<number[]> {
   const { matchRule } = await import("../../../../src/pipeline/rules.js")
+  // Warmup: ensure JIT compilation is complete before timing
+  matchRule(transcript, mode as any)
+  matchRule(transcript, mode as any)
   return Promise.all(
     Array.from({ length: trials }, async () => {
       const t0 = performance.now()

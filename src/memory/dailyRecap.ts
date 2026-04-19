@@ -243,7 +243,7 @@ Be specific. Use names, dollar amounts, and intents from the data. No preamble. 
           { role: 'user', content: prompt },
         ],
       }),
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(CONFIG.OLLAMA_RECAP_TIMEOUT_MS),
     })
     const data  = await res.json() as { message: { content: string } }
     const raw   = data.message.content.trim().replace(/```json|```/g, '').trim()

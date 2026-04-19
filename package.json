@@ -4,7 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=all",
+    "test:latency": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=latency",
+    "test:accuracy": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=accuracy",
+    "test:edge": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=edge",
+    "test:memory": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=memory",
+    "test:failure": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=failure",
+    "test:coach": "npx tsx IRA_test_suite/src/harness/runner.ts --suite=coach",
+    "bench": "npx tsx src/bench.ts",
     "start": "npx tsx src/index.ts"
   },
   "keywords": [],

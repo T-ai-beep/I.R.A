@@ -40,7 +40,9 @@ async function init() {
   const { clearMemory, getContext, getLastTurn } = await import('./pipeline/memory.js')
   const { loadKnowledgeBase, ragQuery, saveToHistory } = await import('./pipeline/rag.js')
   const { getDueItems, getForcedItems, fireItem } = await import('./pipeline/pressure.js')
+  const { pruneOldPlays } = await import('./pipeline/playbook.js')
   const { getSessionManager } = await import('./pipeline/session.js')
+  type SessionSummary = import('./pipeline/session.js').SessionSummary
   const { VAD } = await import('./audio/vad.js')
 
   type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
@@ -95,6 +97,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
           ],
           stream: true,
         }),
+        signal: AbortSignal.timeout(CONFIG.OLLAMA_STREAM_TIMEOUT_MS),
       })
 
       if (!res.body) throw new Error('no body')
@@ -166,6 +169,9 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
       if (result) { emitARSignal(urgencyToARSignal(result.state), result.message); speakFn(enforceOutput(result.message)) }
     }, PRESSURE_POLL_MS)
   }
+
+  // ── Startup maintenance ───────────────────────────────────────────────────
+  pruneOldPlays(CONFIG.PLAYS_RETENTION_DAYS)
 
   // ── Warmup (parallel) ────────────────────────────────────────────────────
   console.log('[INIT] warming up whisper, embeddings, and knowledge base in parallel...')
@@ -327,7 +333,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     emitARSignal('GREEN', `session started`)
   })
 
-  sessionMgr.on('sessionEnd', (summary: any) => {
+  sessionMgr.on('sessionEnd', (summary: SessionSummary) => {
     console.log(`\n[SESSION] ■ conversation ended`)
     console.log(`  Duration: ${Math.round(summary.durationMs / 1000)}s`)
     console.log(`  Outcome:  ${summary.outcome}`)

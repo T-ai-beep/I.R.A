@@ -90,7 +90,7 @@ async function embed(text: string): Promise<number[]> {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'nomic-embed-text', input: text }),
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(CONFIG.OLLAMA_EMBED_TIMEOUT_MS),
     })
     const data = await res.json() as { embeddings: number[][] }
     return data.embeddings[0] ?? []
