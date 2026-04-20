@@ -40,8 +40,10 @@ async function init() {
   const { clearMemory, getContext, getLastTurn } = await import('./pipeline/memory.js')
   const { loadKnowledgeBase, ragQuery, saveToHistory } = await import('./pipeline/rag.js')
   const { getDueItems, getForcedItems, fireItem } = await import('./pipeline/pressure.js')
+  const { pruneOldPlays } = await import('./pipeline/playbook.js')
   const { getSessionManager } = await import('./pipeline/session.js')
-  const { VAD, SpeechEndPayload, SpeechChunkPayload } = await import('./audio/vad.js') as any
+  type SessionSummary = import('./pipeline/session.js').SessionSummary
+  const { VAD } = await import('./audio/vad.js')
 
   type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -61,12 +63,15 @@ async function init() {
       ? `Last offer: $${ctx.lastOffer}. Last intent: ${ctx.lastIntent}.`
       : ctx.lastIntent ? `Last intent: ${ctx.lastIntent}.` : ''
 
-    const ragContext    = await ragQuery(transcript, { useWeb: true, useHistory: true, useKB: true })
-    const ragLine       = ragContext ? `\n\nContext:\n${ragContext}` : ''
-    const sessionCtx    = sessionMgr.getSessionContext()
-    const leverageLine  = [
+    const [ragContext, episodic] = await Promise.all([
+      ragQuery(transcript, { useWeb: true, useHistory: true, useKB: true }),
+      getEpisodicContext(transcript),
+    ])
+    const ragLine      = ragContext ? `\n\nContext:\n${ragContext}` : ''
+    const sessionCtx   = sessionMgr.getSessionContext()
+    const leverageLine = [
       getTaskContext(), getFollowUpContext(), getPeopleContext(transcript),
-      getTrajectoryContext(), await getEpisodicContext(transcript),
+      getTrajectoryContext(), episodic,
       getIdentityContext(transcript), sessionCtx,
     ].filter(Boolean).join('\n\n')
 
@@ -92,6 +97,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
           ],
           stream: true,
         }),
+        signal: AbortSignal.timeout(CONFIG.OLLAMA_STREAM_TIMEOUT_MS),
       })
 
       if (!res.body) throw new Error('no body')
@@ -164,18 +170,17 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     }, PRESSURE_POLL_MS)
   }
 
-  // ── Warmup ────────────────────────────────────────────────────────────────
-  console.log('[INIT] warming up whisper...')
-  await transcribe(Buffer.alloc(CONFIG.SAMPLE_RATE * 2))
-  console.log('[INIT] whisper ready')
+  // ── Startup maintenance ───────────────────────────────────────────────────
+  pruneOldPlays(CONFIG.PLAYS_RETENTION_DAYS)
 
-  console.log('[INIT] warming up embeddings...')
-  await warmupEmbeddings()
-  console.log('[INIT] embeddings ready')
-
-  console.log('[INIT] loading knowledge base...')
-  await loadKnowledgeBase()
-  console.log('[INIT] RAG ready')
+  // ── Warmup (parallel) ────────────────────────────────────────────────────
+  console.log('[INIT] warming up whisper, embeddings, and knowledge base in parallel...')
+  await Promise.all([
+    transcribe(Buffer.alloc(CONFIG.SAMPLE_RATE * 2)),
+    warmupEmbeddings(),
+    loadKnowledgeBase(),
+  ])
+  console.log('[INIT] all systems ready')
 
   speak('online')
 
@@ -328,7 +333,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     emitARSignal('GREEN', `session started`)
   })
 
-  sessionMgr.on('sessionEnd', (summary: any) => {
+  sessionMgr.on('sessionEnd', (summary: SessionSummary) => {
     console.log(`\n[SESSION] ■ conversation ended`)
     console.log(`  Duration: ${Math.round(summary.durationMs / 1000)}s`)
     console.log(`  Outcome:  ${summary.outcome}`)
