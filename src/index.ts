@@ -20,11 +20,7 @@ function enforceOutput(text: string): string {
   return words.length > MAX_SPOKEN_WORDS ? words.slice(0, MAX_SPOKEN_WORDS).join(' ') : text.trim()
 }
 
-type ARSignal = 'RED' | 'YELLOW' | 'GREEN'
-function emitARSignal(signal: ARSignal, reason: string) {
-  console.log(`[AR] ${signal} — ${reason}`)
-}
-function urgencyToARSignal(urgency: string): ARSignal {
+function urgencyToARSignal(urgency: string): 'RED' | 'YELLOW' | 'GREEN' {
   if (urgency === 'CRITICAL' || urgency === 'FORCED' || urgency === 'HIGH') return 'RED'
   if (urgency === 'MEDIUM') return 'YELLOW'
   return 'GREEN'
@@ -44,6 +40,9 @@ async function init() {
   const { getSessionManager } = await import('./pipeline/session.js')
   type SessionSummary = import('./pipeline/session.js').SessionSummary
   const { VAD } = await import('./audio/vad.js')
+  const { startServer, emitARSignal, emitSessionStart, emitSessionEnd, updateLiveState } = await import('./server.js')
+  const { getCRMAdapter } = await import('./integrations/crm.js')
+  const crmAdapter = await getCRMAdapter()
 
   type Mode = 'negotiation' | 'meeting' | 'interview' | 'social'
 
@@ -170,6 +169,9 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     }, PRESSURE_POLL_MS)
   }
 
+  // ── Server ────────────────────────────────────────────────────────────────
+  startServer(CONFIG.SERVER_PORT)
+
   // ── Startup maintenance ───────────────────────────────────────────────────
   pruneOldPlays(CONFIG.PLAYS_RETENTION_DAYS)
 
@@ -279,6 +281,7 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
       const enforced = enforceOutput(decision)
       console.log(`[FIRE] "${enforced}"`)
       emitARSignal('RED', enforced)
+      updateLiveState({ lastResponse: enforced })
       saveToHistory({ ts: Date.now(), transcript, intent: null, response: enforced })
 
     } catch (err) {
@@ -328,8 +331,9 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
 
   // ── Session events ─────────────────────────────────────────────────────────
 
-  sessionMgr.on('sessionStart', ({ sessionId }: { sessionId: string; ts: number }) => {
+  sessionMgr.on('sessionStart', ({ sessionId, ts }: { sessionId: string; ts: number }) => {
     console.log(`\n[SESSION] ▶ new conversation — ${sessionId}`)
+    emitSessionStart(sessionId, ts)
     emitARSignal('GREEN', `session started`)
   })
 
@@ -340,6 +344,8 @@ ${memLine}${ragLine}${leverageLine ? '\n\n' + leverageLine : ''}`
     console.log(`  Summary:  ${summary.summary}`)
     if (summary.nextStep) console.log(`  Next:     ${summary.nextStep}`)
     if (summary.lastOffer) console.log(`  Offer:    $${summary.lastOffer}`)
+    emitSessionEnd(summary)
+    if (crmAdapter) crmAdapter.logCall(summary).catch(e => console.error('[CRM] logCall failed:', e))
   })
 
   vad.start()

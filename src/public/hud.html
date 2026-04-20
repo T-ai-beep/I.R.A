@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>I.R.A — Live HUD</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0a;
+    color: #e0e0e0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    padding: 16px;
+  }
+
+  .header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .logo { font-size: 1.1rem; color: #888; letter-spacing: 0.15em; }
+  .logo span { color: #fff; }
+  #ws-status { font-size: 0.75rem; color: #555; }
+  #ws-status.connected { color: #4caf50; }
+
+  .card {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .card-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #555;
+  }
+  .card-value {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.1;
+    transition: color 0.2s;
+  }
+  .card-sub {
+    font-size: 0.8rem;
+    color: #666;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* AR Signal card */
+  #signal-card { grid-column: 1; }
+  #signal-value.RED    { color: #f44336; }
+  #signal-value.YELLOW { color: #ffc107; }
+  #signal-value.GREEN  { color: #4caf50; }
+  #signal-value.NONE   { color: #444; }
+
+  /* Session card */
+  #session-card { grid-column: 2; }
+  #session-value { font-size: 1.4rem; }
+
+  /* Event / Response spans full width */
+  #response-card { grid-column: 1 / -1; }
+  #response-value {
+    font-size: 1.3rem;
+    font-weight: 400;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: #ccc;
+  }
+
+  /* Escalation bar */
+  #level-card { grid-column: 1; }
+  .level-bar {
+    display: flex;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .level-pip {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    background: #222;
+    transition: background 0.3s;
+  }
+  .level-pip.active { background: #ffc107; }
+  .level-pip.active.l4 { background: #f44336; }
+
+  /* Offer card */
+  #offer-card { grid-column: 2; }
+  #offer-value { color: #4caf50; }
+
+  /* Footer */
+  .footer {
+    grid-column: 1 / -1;
+    font-size: 0.7rem;
+    color: #333;
+    text-align: center;
+  }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+  .live-dot {
+    display: inline-block;
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: #f44336;
+    animation: pulse 1.2s infinite;
+    margin-right: 6px;
+  }
+  .live-dot.idle { background: #444; animation: none; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">I.<span>R</span>.A <span style="color:#555;font-size:0.8rem">live hud</span></div>
+  <div id="ws-status">connecting…</div>
+</div>
+
+<!-- AR Signal -->
+<div class="card" id="signal-card">
+  <div class="card-label">AR Signal</div>
+  <div class="card-value NONE" id="signal-value">—</div>
+  <div class="card-sub" id="signal-reason">no signal yet</div>
+</div>
+
+<!-- Session -->
+<div class="card" id="session-card">
+  <div class="card-label"><span class="live-dot idle" id="live-dot"></span>Session</div>
+  <div class="card-value" id="session-value" style="color:#888">idle</div>
+  <div class="card-sub" id="session-timer">—</div>
+</div>
+
+<!-- Last Response -->
+<div class="card" id="response-card">
+  <div class="card-label">Last ARIA Response</div>
+  <div class="card-value" id="response-value" style="color:#444">waiting…</div>
+</div>
+
+<!-- Escalation Level -->
+<div class="card" id="level-card">
+  <div class="card-label">Escalation</div>
+  <div class="card-value" id="level-value" style="color:#888">L0</div>
+  <div class="level-bar" id="level-bar">
+    <div class="level-pip" id="pip0"></div>
+    <div class="level-pip" id="pip1"></div>
+    <div class="level-pip" id="pip2"></div>
+    <div class="level-pip" id="pip3"></div>
+    <div class="level-pip" id="pip4"></div>
+  </div>
+  <div class="card-sub" id="level-name">Probe</div>
+</div>
+
+<!-- Last Offer -->
+<div class="card" id="offer-card">
+  <div class="card-label">Last Offer Detected</div>
+  <div class="card-value" id="offer-value" style="color:#444">—</div>
+  <div class="card-sub" id="turn-count">0 turns</div>
+</div>
+
+<div class="footer">I.R.A · <a href="/analytics" style="color:#444;text-decoration:none">analytics →</a></div>
+
+<script>
+  const LEVEL_NAMES = ['Probe', 'Soft Pressure', 'Direct Ask', 'Urgency', 'Close']
+
+  let sessionStartTs = null
+  let timerInterval  = null
+  let state          = {}
+
+  function fmt(ms) {
+    const s = Math.floor(ms / 1000)
+    return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`
+  }
+
+  function applyState(s) {
+    state = s
+
+    // AR Signal
+    const sig = s.arSignal || 'NONE'
+    const el  = document.getElementById('signal-value')
+    el.textContent = sig === 'NONE' ? '—' : sig
+    el.className   = `card-value ${sig}`
+    document.getElementById('signal-reason').textContent = s.arReason || 'no signal yet'
+
+    // Response
+    const resp = document.getElementById('response-value')
+    if (s.lastResponse) {
+      resp.textContent = `"${s.lastResponse}"`
+      resp.style.color = ''
+    } else {
+      resp.textContent = 'waiting…'
+      resp.style.color = '#444'
+    }
+
+    // Level
+    const lvl = typeof s.level === 'number' ? s.level : 0
+    document.getElementById('level-value').textContent = `L${lvl}`
+    document.getElementById('level-name').textContent  = LEVEL_NAMES[lvl] ?? ''
+    for (let i = 0; i <= 4; i++) {
+      const pip = document.getElementById(`pip${i}`)
+      pip.className = 'level-pip' + (i <= lvl ? ' active' + (lvl === 4 ? ' l4' : '') : '')
+    }
+
+    // Offer
+    const offerEl = document.getElementById('offer-value')
+    if (s.lastOffer) {
+      offerEl.textContent = `$${s.lastOffer.toLocaleString()}`
+      offerEl.style.color = ''
+    } else {
+      offerEl.textContent = '—'
+      offerEl.style.color = '#444'
+    }
+
+    // Turn count
+    document.getElementById('turn-count').textContent = `${s.turnCount ?? 0} turns`
+
+    // Session
+    const dot = document.getElementById('live-dot')
+    const sv  = document.getElementById('session-value')
+    if (s.sessionActive) {
+      dot.className    = 'live-dot'
+      sv.textContent   = s.mode || 'active'
+      sv.style.color   = ''
+      sessionStartTs   = s.sessionStartTs || Date.now()
+      if (!timerInterval) {
+        timerInterval = setInterval(() => {
+          document.getElementById('session-timer').textContent = fmt(Date.now() - sessionStartTs)
+        }, 1000)
+      }
+    } else {
+      dot.className  = 'live-dot idle'
+      sv.textContent = 'idle'
+      sv.style.color = '#888'
+      document.getElementById('session-timer').textContent = '—'
+      if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
+      sessionStartTs = null
+    }
+  }
+
+  function connect() {
+    const ws   = new WebSocket(`ws://${location.host}/ws`)
+    const stat = document.getElementById('ws-status')
+
+    ws.onopen  = () => { stat.textContent = 'live'; stat.className = 'connected' }
+    ws.onclose = () => {
+      stat.textContent = 'reconnecting…'; stat.className = ''
+      setTimeout(connect, 2000)
+    }
+    ws.onerror = () => ws.close()
+
+    ws.onmessage = ({ data }) => {
+      let msg
+      try { msg = JSON.parse(data) } catch { return }
+
+      if (msg.type === 'state') {
+        applyState(msg)
+      } else if (msg.type === 'ar_signal') {
+        applyState({ ...state, arSignal: msg.signal, arReason: msg.reason })
+      } else if (msg.type === 'session_start') {
+        applyState({ ...state, sessionActive: true, sessionId: msg.sessionId, sessionStartTs: msg.ts, turnCount: 0 })
+      } else if (msg.type === 'session_end') {
+        applyState({ ...state, sessionActive: false })
+      }
+    }
+  }
+
+  connect()
+</script>
+</body>
+</html>

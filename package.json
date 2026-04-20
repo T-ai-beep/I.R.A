@@ -19,11 +19,15 @@
   "license": "ISC",
   "type": "module",
   "dependencies": {
+    "express": "^5.2.1",
     "node-record-lpcm16": "^1.0.1",
     "tsx": "^4.21.0",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.2",
+    "ws": "^8.20.0"
   },
   "devDependencies": {
-    "@types/node": "^25.6.0"
+    "@types/express": "^5.0.6",
+    "@types/node": "^25.6.0",
+    "@types/ws": "^8.18.1"
   }
 }

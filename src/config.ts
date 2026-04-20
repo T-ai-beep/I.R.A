@@ -43,4 +43,11 @@ export const CONFIG = {
   MIN_SESSION_TURNS: 2,
   MAX_SUMMARY_CHARS: 500,
   PLAYS_RETENTION_DAYS: 30,
+
+  // Server (HUD + analytics + mobile + CRM)
+  SERVER_PORT: Number(process.env.SERVER_PORT ?? 3000),
+
+  // CRM — set CRM_PROVIDER=hubspot and CRM_API_KEY=<key> to enable
+  CRM_PROVIDER: (process.env.CRM_PROVIDER ?? '') as 'hubspot' | 'salesforce' | '',
+  CRM_API_KEY:  process.env.CRM_API_KEY ?? '',
 } as const

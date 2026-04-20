@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>I.R.A — Coaching Analytics</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0a0a;
+    color: #e0e0e0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    min-height: 100vh;
+    padding: 20px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+  .logo { font-size: 1.1rem; color: #888; letter-spacing: 0.15em; }
+  .logo span { color: #fff; }
+  .nav a { color: #555; text-decoration: none; font-size: 0.8rem; }
+  .nav a:hover { color: #e0e0e0; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+
+  .card {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 16px 20px;
+  }
+  .card-label {
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #555;
+    margin-bottom: 8px;
+  }
+  .stat-value {
+    font-size: 2.5rem;
+    font-weight: 700;
+    line-height: 1;
+  }
+  .stat-sub {
+    font-size: 0.75rem;
+    color: #666;
+    margin-top: 4px;
+  }
+  .good  { color: #4caf50; }
+  .warn  { color: #ffc107; }
+  .bad   { color: #f44336; }
+  .muted { color: #888; }
+
+  .chart-card {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 16px;
+  }
+  .chart-card h3 {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #555;
+    margin-bottom: 14px;
+  }
+  canvas { max-height: 220px; }
+
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-bottom: 16px;
+  }
+
+  .pattern-list { list-style: none; }
+  .pattern-list li {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: 0.8rem;
+  }
+  .pattern-list li:last-child { border-bottom: none; }
+  .badge {
+    font-size: 0.65rem;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: #1e1e1e;
+    color: #aaa;
+  }
+  .badge.red    { background: #3c1515; color: #f44336; }
+  .badge.yellow { background: #3a2e00; color: #ffc107; }
+  .badge.green  { background: #0e2e12; color: #4caf50; }
+
+  .recap-box {
+    background: #0e1a12;
+    border: 1px solid #1a3a20;
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: #9ec8a4;
+    margin-bottom: 16px;
+  }
+  .recap-box h3 { color: #4caf50; margin-bottom: 8px; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.1em; }
+
+  .decisions-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.75rem;
+    margin-top: 8px;
+  }
+  .decisions-table th {
+    text-align: left;
+    color: #555;
+    font-weight: normal;
+    padding: 4px 8px;
+    border-bottom: 1px solid #1a1a1a;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .decisions-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid #151515;
+    color: #aaa;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .decisions-table tr:hover td { background: #161616; }
+  .event-tag {
+    font-size: 0.65rem;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: #1e1e1e;
+    color: #888;
+  }
+
+  footer { color: #333; font-size: 0.7rem; text-align: center; margin-top: 24px; }
+  footer a { color: #444; text-decoration: none; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">I.<span>R</span>.A <span style="color:#555;font-size:0.8rem">analytics</span></div>
+  <nav class="nav"><a href="/">← live hud</a></nav>
+</header>
+
+<!-- KPI row -->
+<div class="grid" id="kpi-grid">
+  <div class="card">
+    <div class="card-label">Total Sessions</div>
+    <div class="stat-value muted" id="stat-sessions">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Win Rate</div>
+    <div class="stat-value" id="stat-winrate" style="color:#888">—</div>
+    <div class="stat-sub" id="stat-winrate-sub"></div>
+  </div>
+  <div class="card">
+    <div class="card-label">Decisions Fired</div>
+    <div class="stat-value muted" id="stat-decisions">—</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Avg Response</div>
+    <div class="stat-value muted" id="stat-avgms">—</div>
+    <div class="stat-sub">milliseconds</div>
+  </div>
+</div>
+
+<!-- Recap -->
+<div class="recap-box" id="recap-box" style="display:none">
+  <h3>Today's Recap</h3>
+  <div id="recap-text"></div>
+</div>
+
+<!-- Charts row -->
+<div class="two-col">
+  <div class="chart-card">
+    <h3>Objection Types</h3>
+    <canvas id="chart-events"></canvas>
+  </div>
+  <div class="chart-card">
+    <h3>Escalation Depth</h3>
+    <canvas id="chart-levels"></canvas>
+  </div>
+</div>
+
+<!-- Patterns + Follow-ups -->
+<div class="two-col">
+  <div class="chart-card">
+    <h3>Detected Patterns</h3>
+    <ul class="pattern-list" id="pattern-list">
+      <li><span class="muted">loading…</span></li>
+    </ul>
+  </div>
+  <div class="chart-card">
+    <h3>Due Follow-ups</h3>
+    <ul class="pattern-list" id="followup-list">
+      <li><span class="muted">loading…</span></li>
+    </ul>
+  </div>
+</div>
+
+<!-- Recent decisions table -->
+<div class="chart-card">
+  <h3>Recent Decisions</h3>
+  <table class="decisions-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Event</th>
+        <th>Response</th>
+        <th>Level</th>
+        <th>ms</th>
+      </tr>
+    </thead>
+    <tbody id="decisions-body"></tbody>
+  </table>
+</div>
+
+<footer>I.R.A · <a href="/">hud</a></footer>
+
+<script>
+  const CHART_DEFAULTS = {
+    responsive: true,
+    maintainAspectRatio: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a1a' } },
+      y: { ticks: { color: '#555', font: { size: 10 } }, grid: { color: '#1a1a1a' } },
+    },
+  }
+
+  let eventsChart, levelsChart
+
+  function fmtTime(ts) {
+    if (!ts) return '—'
+    const d = new Date(ts)
+    return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  }
+
+  function winColor(rate) {
+    if (rate >= 0.6) return 'good'
+    if (rate >= 0.4) return 'warn'
+    return 'bad'
+  }
+
+  function renderAnalytics(data) {
+    const { stats, patterns, decisions } = data
+
+    // KPIs
+    if (stats) {
+      document.getElementById('stat-sessions').textContent   = stats.totalSessions ?? '—'
+      document.getElementById('stat-decisions').textContent  = stats.totalDecisions ?? decisions?.length ?? '—'
+
+      if (typeof stats.winRate === 'number') {
+        const pct = Math.round(stats.winRate * 100)
+        const el  = document.getElementById('stat-winrate')
+        el.textContent = `${pct}%`
+        el.className   = `stat-value ${winColor(stats.winRate)}`
+        document.getElementById('stat-winrate-sub').textContent =
+          `${stats.wins ?? '?'} wins / ${stats.losses ?? '?'} losses`
+      }
+
+      if (stats.avgResponseMs) {
+        document.getElementById('stat-avgms').textContent = Math.round(stats.avgResponseMs)
+      }
+    }
+
+    // Patterns
+    const pl = document.getElementById('pattern-list')
+    if (patterns && patterns.length > 0) {
+      pl.innerHTML = patterns.map(p => {
+        const cls = p.severity === 'HIGH' ? 'red' : p.severity === 'MEDIUM' ? 'yellow' : 'green'
+        return `<li><span>${p.label ?? p.type}</span><span class="badge ${cls}">${p.severity ?? ''}</span></li>`
+      }).join('')
+    } else {
+      pl.innerHTML = '<li><span class="muted">no patterns detected</span></li>'
+    }
+
+    // Charts from decisions
+    if (decisions && decisions.length > 0) {
+      // Event distribution
+      const eventCounts = {}
+      const levelCounts = [0, 0, 0, 0, 0]
+      decisions.forEach(d => {
+        if (d.event) eventCounts[d.event] = (eventCounts[d.event] ?? 0) + 1
+        const lvl = d.level ?? 0
+        if (lvl >= 0 && lvl <= 4) levelCounts[lvl]++
+      })
+
+      const evLabels = Object.keys(eventCounts).slice(0, 8)
+      const evData   = evLabels.map(k => eventCounts[k])
+
+      if (eventsChart) eventsChart.destroy()
+      eventsChart = new Chart(document.getElementById('chart-events'), {
+        type: 'bar',
+        data: {
+          labels: evLabels,
+          datasets: [{ data: evData, backgroundColor: '#ffc107aa', borderColor: '#ffc107', borderWidth: 1 }],
+        },
+        options: { ...CHART_DEFAULTS },
+      })
+
+      if (levelsChart) levelsChart.destroy()
+      levelsChart = new Chart(document.getElementById('chart-levels'), {
+        type: 'bar',
+        data: {
+          labels: ['L0 Probe', 'L1 Soft', 'L2 Direct', 'L3 Urgency', 'L4 Close'],
+          datasets: [{ data: levelCounts, backgroundColor: '#4caf5088', borderColor: '#4caf50', borderWidth: 1 }],
+        },
+        options: { ...CHART_DEFAULTS },
+      })
+
+      // Decisions table (most recent first, already reversed by server)
+      const tbody = document.getElementById('decisions-body')
+      tbody.innerHTML = decisions.slice(0, 30).map(d => `
+        <tr>
+          <td>${fmtTime(d.ts)}</td>
+          <td><span class="event-tag">${d.event ?? '—'}</span></td>
+          <td title="${d.response ?? ''}">${(d.response ?? '—').slice(0, 60)}</td>
+          <td>L${d.level ?? 0}</td>
+          <td>${d.ms ?? '—'}</td>
+        </tr>`).join('')
+    }
+  }
+
+  function renderFollowups(followups) {
+    const fl = document.getElementById('followup-list')
+    if (!followups || followups.length === 0) {
+      fl.innerHTML = '<li><span class="muted">no follow-ups due</span></li>'
+      return
+    }
+    fl.innerHTML = followups.slice(0, 8).map(f => {
+      const cls = f.priority === 'HIGH' ? 'red' : f.priority === 'MEDIUM' ? 'yellow' : ''
+      return `<li><span>${f.action ?? f.person ?? '—'}</span><span class="badge ${cls}">${f.priority ?? ''}</span></li>`
+    }).join('')
+  }
+
+  function renderRecap(recap) {
+    if (!recap || !recap.summary) return
+    const box = document.getElementById('recap-box')
+    box.style.display = ''
+    document.getElementById('recap-text').textContent = recap.summary
+  }
+
+  async function load() {
+    try {
+      const [analytics, followups, recap] = await Promise.all([
+        fetch('/api/analytics').then(r => r.json()),
+        fetch('/api/followups').then(r => r.json()),
+        fetch('/api/recap').then(r => r.json()).catch(() => null),
+      ])
+      renderAnalytics(analytics)
+      renderFollowups(followups)
+      if (recap) renderRecap(recap)
+    } catch (e) {
+      console.error('Failed to load analytics:', e)
+    }
+  }
+
+  load()
+  // Refresh every 30s
+  setInterval(load, 30_000)
+</script>
+</body>
+</html>
