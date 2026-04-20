@@ -251,3 +251,8 @@ export function startServer(port = CONFIG.SERVER_PORT): void {
     console.log(`[SERVER] API      → http://localhost:${port}/api/state`)
   })
 }
+
+// Auto-start when run directly: npx tsx src/server.ts
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
+  startServer()
+}

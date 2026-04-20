@@ -2,276 +2,414 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>I.R.A — Live HUD</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>I.R.A</title>
 <style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --cyan:   #00e5ff;
+    --red:    #ff1744;
+    --yellow: #ffd600;
+    --green:  #00e676;
+    --dim:    rgba(0,229,255,0.12);
+    --border: rgba(0,229,255,0.25);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
   body {
-    background: #0a0a0a;
-    color: #e0e0e0;
-    font-family: 'SF Mono', 'Fira Code', monospace;
-    height: 100vh;
-    display: grid;
-    grid-template-rows: auto 1fr auto;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-    padding: 16px;
+    background: #020b12;
+    color: var(--cyan);
+    font-family: 'Courier New', monospace;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
   }
 
-  .header {
-    grid-column: 1 / -1;
+  /* ── scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.18) 2px,
+      rgba(0,0,0,0.18) 4px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  /* ── corner brackets ── */
+  .corner {
+    position: fixed;
+    width: 28px; height: 28px;
+    border-color: var(--cyan);
+    border-style: solid;
+    opacity: 0.45;
+  }
+  .corner.tl { top: 12px; left: 12px;  border-width: 2px 0 0 2px; }
+  .corner.tr { top: 12px; right: 12px; border-width: 2px 2px 0 0; }
+  .corner.bl { bottom: 12px; left: 12px;  border-width: 0 0 2px 2px; }
+  .corner.br { bottom: 12px; right: 12px; border-width: 0 2px 2px 0; }
+
+  /* ── header ── */
+  .hdr {
+    position: fixed;
+    top: 0; left: 0; right: 0;
     display: flex;
     align-items: center;
     justify-content: space-between;
-  }
-  .logo { font-size: 1.1rem; color: #888; letter-spacing: 0.15em; }
-  .logo span { color: #fff; }
-  #ws-status { font-size: 0.75rem; color: #555; }
-  #ws-status.connected { color: #4caf50; }
-
-  .card {
-    background: #111;
-    border: 1px solid #222;
-    border-radius: 8px;
-    padding: 16px 20px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .card-label {
-    font-size: 0.65rem;
+    padding: 14px 20px 0;
+    font-size: 0.6rem;
+    letter-spacing: 0.2em;
+    color: rgba(0,229,255,0.4);
     text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: #555;
   }
-  .card-value {
-    font-size: 2rem;
-    font-weight: 700;
-    line-height: 1.1;
-    transition: color 0.2s;
-  }
-  .card-sub {
-    font-size: 0.8rem;
-    color: #666;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  /* AR Signal card */
-  #signal-card { grid-column: 1; }
-  #signal-value.RED    { color: #f44336; }
-  #signal-value.YELLOW { color: #ffc107; }
-  #signal-value.GREEN  { color: #4caf50; }
-  #signal-value.NONE   { color: #444; }
-
-  /* Session card */
-  #session-card { grid-column: 2; }
-  #session-value { font-size: 1.4rem; }
-
-  /* Event / Response spans full width */
-  #response-card { grid-column: 1 / -1; }
-  #response-value {
-    font-size: 1.3rem;
-    font-weight: 400;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    color: #ccc;
-  }
-
-  /* Escalation bar */
-  #level-card { grid-column: 1; }
-  .level-bar {
-    display: flex;
-    gap: 6px;
-    margin-top: 4px;
-  }
-  .level-pip {
-    flex: 1;
-    height: 8px;
-    border-radius: 4px;
-    background: #222;
+  #ws-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: #333;
+    display: inline-block;
+    margin-right: 6px;
     transition: background 0.3s;
   }
-  .level-pip.active { background: #ffc107; }
-  .level-pip.active.l4 { background: #f44336; }
+  #ws-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
 
-  /* Offer card */
-  #offer-card { grid-column: 2; }
-  #offer-value { color: #4caf50; }
+  /* ── main signal ring ── */
+  .ring-wrap {
+    position: relative;
+    width: min(64vw, 240px);
+    aspect-ratio: 1;
+    margin-bottom: 20px;
+  }
+  .ring-svg {
+    width: 100%; height: 100%;
+    transform: rotate(-90deg);
+  }
+  .ring-track { fill: none; stroke: rgba(0,229,255,0.08); stroke-width: 3; }
+  .ring-arc   { fill: none; stroke: var(--cyan); stroke-width: 3; stroke-linecap: round;
+                transition: stroke 0.4s, stroke-dashoffset 0.6s;
+                stroke-dasharray: 628; stroke-dashoffset: 0; }
 
-  /* Footer */
-  .footer {
-    grid-column: 1 / -1;
-    font-size: 0.7rem;
-    color: #333;
+  .ring-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+  #signal-label {
+    font-size: 2.2rem;
+    font-weight: 900;
+    letter-spacing: 0.15em;
+    transition: color 0.3s, text-shadow 0.3s;
+    color: var(--cyan);
+  }
+  #signal-label.RED    { color: var(--red);    text-shadow: 0 0 20px var(--red); }
+  #signal-label.YELLOW { color: var(--yellow); text-shadow: 0 0 20px var(--yellow); }
+  #signal-label.GREEN  { color: var(--green);  text-shadow: 0 0 20px var(--green); }
+
+  #signal-reason {
+    font-size: 0.55rem;
+    letter-spacing: 0.12em;
+    color: rgba(0,229,255,0.5);
     text-align: center;
+    padding: 0 16px;
+    text-transform: uppercase;
   }
 
-  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
-  .live-dot {
-    display: inline-block;
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: #f44336;
-    animation: pulse 1.2s infinite;
-    margin-right: 6px;
+  /* ── info rows ── */
+  .info-grid {
+    width: min(90vw, 360px);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
   }
-  .live-dot.idle { background: #444; animation: none; }
+
+  .row {
+    display: flex;
+    align-items: center;
+    border: 1px solid var(--border);
+    background: var(--dim);
+    border-radius: 4px;
+    padding: 10px 14px;
+    gap: 12px;
+  }
+  .row-label {
+    font-size: 0.5rem;
+    letter-spacing: 0.18em;
+    color: rgba(0,229,255,0.4);
+    text-transform: uppercase;
+    width: 52px;
+    flex-shrink: 0;
+  }
+  .row-value {
+    font-size: 0.85rem;
+    letter-spacing: 0.06em;
+    color: var(--cyan);
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .row-value.dim { color: rgba(0,229,255,0.3); }
+
+  /* level pips */
+  .pips { display: flex; gap: 5px; }
+  .pip {
+    width: 22px; height: 4px; border-radius: 2px;
+    background: rgba(0,229,255,0.1);
+    border: 1px solid rgba(0,229,255,0.15);
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .pip.on { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); }
+  .pip.on.l4 { background: var(--red); box-shadow: 0 0 8px var(--red); }
+
+  /* ── footer ── */
+  .ftr {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 0 20px 12px;
+    font-size: 0.5rem;
+    letter-spacing: 0.16em;
+    color: rgba(0,229,255,0.22);
+    text-transform: uppercase;
+  }
+
+  /* ── pulse on signal change ── */
+  @keyframes pulse-ring {
+    0%   { opacity: 1; transform: scale(1); }
+    100% { opacity: 0; transform: scale(1.35); }
+  }
+  .pulse-overlay {
+    position: absolute; inset: 0;
+    border-radius: 50%;
+    border: 2px solid var(--cyan);
+    animation: pulse-ring 0.7s ease-out forwards;
+    pointer-events: none;
+  }
+
+  /* ── session active glow on body ── */
+  body.session-active::after {
+    content: '';
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at center, rgba(0,229,255,0.04) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  @media (max-height: 600px) {
+    .ring-wrap { width: min(44vw, 160px); margin-bottom: 12px; }
+    #signal-label { font-size: 1.6rem; }
+    .row { padding: 7px 12px; }
+    .row-value { font-size: 0.78rem; }
+  }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div class="logo">I.<span>R</span>.A <span style="color:#555;font-size:0.8rem">live hud</span></div>
-  <div id="ws-status">connecting…</div>
+<div class="corner tl"></div>
+<div class="corner tr"></div>
+<div class="corner bl"></div>
+<div class="corner br"></div>
+
+<div class="hdr">
+  <span><span id="ws-dot"></span>I.R.A</span>
+  <span id="clock">--:--:--</span>
+  <span id="mode-label">—</span>
 </div>
 
-<!-- AR Signal -->
-<div class="card" id="signal-card">
-  <div class="card-label">AR Signal</div>
-  <div class="card-value NONE" id="signal-value">—</div>
-  <div class="card-sub" id="signal-reason">no signal yet</div>
-</div>
-
-<!-- Session -->
-<div class="card" id="session-card">
-  <div class="card-label"><span class="live-dot idle" id="live-dot"></span>Session</div>
-  <div class="card-value" id="session-value" style="color:#888">idle</div>
-  <div class="card-sub" id="session-timer">—</div>
-</div>
-
-<!-- Last Response -->
-<div class="card" id="response-card">
-  <div class="card-label">Last ARIA Response</div>
-  <div class="card-value" id="response-value" style="color:#444">waiting…</div>
-</div>
-
-<!-- Escalation Level -->
-<div class="card" id="level-card">
-  <div class="card-label">Escalation</div>
-  <div class="card-value" id="level-value" style="color:#888">L0</div>
-  <div class="level-bar" id="level-bar">
-    <div class="level-pip" id="pip0"></div>
-    <div class="level-pip" id="pip1"></div>
-    <div class="level-pip" id="pip2"></div>
-    <div class="level-pip" id="pip3"></div>
-    <div class="level-pip" id="pip4"></div>
+<!-- AR signal ring -->
+<div class="ring-wrap" id="ring-wrap">
+  <svg class="ring-svg" viewBox="0 0 200 200">
+    <circle class="ring-track" cx="100" cy="100" r="90"/>
+    <circle class="ring-arc"   cx="100" cy="100" r="90" id="ring-arc"/>
+  </svg>
+  <div class="ring-center">
+    <div id="signal-label">I.R.A</div>
+    <div id="signal-reason">standing by</div>
   </div>
-  <div class="card-sub" id="level-name">Probe</div>
 </div>
 
-<!-- Last Offer -->
-<div class="card" id="offer-card">
-  <div class="card-label">Last Offer Detected</div>
-  <div class="card-value" id="offer-value" style="color:#444">—</div>
-  <div class="card-sub" id="turn-count">0 turns</div>
+<!-- Info rows -->
+<div class="info-grid">
+
+  <div class="row">
+    <div class="row-label">Response</div>
+    <div class="row-value dim" id="last-response">—</div>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Level</div>
+    <div class="row-value">
+      <div class="pips">
+        <div class="pip" id="p0"></div>
+        <div class="pip" id="p1"></div>
+        <div class="pip" id="p2"></div>
+        <div class="pip" id="p3"></div>
+        <div class="pip" id="p4"></div>
+      </div>
+    </div>
+    <span style="font-size:0.6rem;color:rgba(0,229,255,0.35);letter-spacing:0.1em" id="level-name">PROBE</span>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Session</div>
+    <div class="row-value dim" id="session-val">idle</div>
+    <span style="font-size:0.6rem;color:rgba(0,229,255,0.35)" id="turn-count">0 turns</span>
+  </div>
+
+  <div class="row">
+    <div class="row-label">Offer</div>
+    <div class="row-value dim" id="offer-val">—</div>
+  </div>
+
 </div>
 
-<div class="footer">I.R.A · <a href="/analytics" style="color:#444;text-decoration:none">analytics →</a></div>
+<div class="ftr">
+  <span id="session-timer">00:00</span>
+  <a href="/analytics" style="color:rgba(0,229,255,0.22);text-decoration:none">analytics →</a>
+</div>
 
 <script>
-  const LEVEL_NAMES = ['Probe', 'Soft Pressure', 'Direct Ask', 'Urgency', 'Close']
+  const LEVEL_NAMES = ['PROBE','SOFT','DIRECT','URGENCY','CLOSE']
+  const ARC_CIRC   = 2 * Math.PI * 90  // ≈ 565.5 (matches stroke-dasharray 628 — we use viewBox r=90)
 
-  let sessionStartTs = null
-  let timerInterval  = null
   let state          = {}
+  let sessionStartTs = null
+  let timerInt       = null
 
-  function fmt(ms) {
-    const s = Math.floor(ms / 1000)
-    return `${Math.floor(s/60)}:${String(s%60).padStart(2,'0')}`
+  // Clock
+  setInterval(() => {
+    document.getElementById('clock').textContent =
+      new Date().toLocaleTimeString([], { hour12: false })
+  }, 1000)
+
+  function pulse() {
+    const wrap = document.getElementById('ring-wrap')
+    const el   = document.createElement('div')
+    el.className = 'pulse-overlay'
+    wrap.appendChild(el)
+    setTimeout(() => el.remove(), 800)
   }
 
-  function applyState(s) {
-    state = s
+  function setArc(pct, color) {
+    const arc = document.getElementById('ring-arc')
+    const offset = ARC_CIRC * (1 - pct)
+    arc.style.strokeDasharray  = ARC_CIRC
+    arc.style.strokeDashoffset = offset
+    arc.style.stroke           = color
+  }
 
-    // AR Signal
-    const sig = s.arSignal || 'NONE'
-    const el  = document.getElementById('signal-value')
-    el.textContent = sig === 'NONE' ? '—' : sig
-    el.className   = `card-value ${sig}`
-    document.getElementById('signal-reason').textContent = s.arReason || 'no signal yet'
+  function apply(s) {
+    const prev = state
+    state = { ...state, ...s }
 
-    // Response
-    const resp = document.getElementById('response-value')
-    if (s.lastResponse) {
-      resp.textContent = `"${s.lastResponse}"`
-      resp.style.color = ''
+    // AR signal
+    const sig = state.arSignal
+    const lbl = document.getElementById('signal-label')
+    lbl.className = `${sig ?? ''}`
+
+    const COLORS = { RED: '#ff1744', YELLOW: '#ffd600', GREEN: '#00e676' }
+    const col    = COLORS[sig] ?? '#00e5ff'
+
+    if (sig) {
+      lbl.textContent = sig
+      setArc(1, col)
+      if (prev.arSignal !== sig) pulse()
     } else {
-      resp.textContent = 'waiting…'
-      resp.style.color = '#444'
+      lbl.textContent = 'I.R.A'
+      setArc(0.15, '#00e5ff')
     }
 
-    // Level
-    const lvl = typeof s.level === 'number' ? s.level : 0
-    document.getElementById('level-value').textContent = `L${lvl}`
-    document.getElementById('level-name').textContent  = LEVEL_NAMES[lvl] ?? ''
-    for (let i = 0; i <= 4; i++) {
-      const pip = document.getElementById(`pip${i}`)
-      pip.className = 'level-pip' + (i <= lvl ? ' active' + (lvl === 4 ? ' l4' : '') : '')
+    document.getElementById('signal-reason').textContent =
+      (state.arReason ?? 'standing by').toUpperCase().slice(0, 38)
+
+    // Last response
+    const respEl = document.getElementById('last-response')
+    if (state.lastResponse) {
+      respEl.textContent = `"${state.lastResponse}"`
+      respEl.className   = 'row-value'
+    } else {
+      respEl.textContent = '—'
+      respEl.className   = 'row-value dim'
     }
+
+    // Level pips
+    const lvl = typeof state.level === 'number' ? state.level : 0
+    for (let i = 0; i <= 4; i++) {
+      const pip = document.getElementById(`p${i}`)
+      pip.className = 'pip' + (i <= lvl ? ' on' + (lvl === 4 ? ' l4' : '') : '')
+    }
+    document.getElementById('level-name').textContent = LEVEL_NAMES[lvl] ?? ''
 
     // Offer
-    const offerEl = document.getElementById('offer-value')
-    if (s.lastOffer) {
-      offerEl.textContent = `$${s.lastOffer.toLocaleString()}`
-      offerEl.style.color = ''
+    const offerEl = document.getElementById('offer-val')
+    if (state.lastOffer) {
+      offerEl.textContent = `$${Number(state.lastOffer).toLocaleString()}`
+      offerEl.className   = 'row-value'
     } else {
       offerEl.textContent = '—'
-      offerEl.style.color = '#444'
+      offerEl.className   = 'row-value dim'
     }
 
+    // Mode label
+    document.getElementById('mode-label').textContent =
+      (state.mode ?? '').toUpperCase()
+
     // Turn count
-    document.getElementById('turn-count').textContent = `${s.turnCount ?? 0} turns`
+    document.getElementById('turn-count').textContent =
+      `${state.turnCount ?? 0} turns`
 
     // Session
-    const dot = document.getElementById('live-dot')
-    const sv  = document.getElementById('session-value')
-    if (s.sessionActive) {
-      dot.className    = 'live-dot'
-      sv.textContent   = s.mode || 'active'
-      sv.style.color   = ''
-      sessionStartTs   = s.sessionStartTs || Date.now()
-      if (!timerInterval) {
-        timerInterval = setInterval(() => {
-          document.getElementById('session-timer').textContent = fmt(Date.now() - sessionStartTs)
+    const sessEl = document.getElementById('session-val')
+    if (state.sessionActive) {
+      document.body.classList.add('session-active')
+      sessEl.textContent = 'active'
+      sessEl.className   = 'row-value'
+      sessionStartTs     = state.sessionStartTs ?? Date.now()
+      if (!timerInt) {
+        timerInt = setInterval(() => {
+          const s = Math.floor((Date.now() - sessionStartTs) / 1000)
+          document.getElementById('session-timer').textContent =
+            `${String(Math.floor(s/60)).padStart(2,'0')}:${String(s%60).padStart(2,'0')}`
         }, 1000)
       }
     } else {
-      dot.className  = 'live-dot idle'
-      sv.textContent = 'idle'
-      sv.style.color = '#888'
-      document.getElementById('session-timer').textContent = '—'
-      if (timerInterval) { clearInterval(timerInterval); timerInterval = null }
+      document.body.classList.remove('session-active')
+      sessEl.textContent = 'idle'
+      sessEl.className   = 'row-value dim'
+      document.getElementById('session-timer').textContent = '00:00'
+      if (timerInt) { clearInterval(timerInt); timerInt = null }
       sessionStartTs = null
     }
   }
 
   function connect() {
-    const ws   = new WebSocket(`ws://${location.host}/ws`)
-    const stat = document.getElementById('ws-status')
+    const dot   = document.getElementById('ws-dot')
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws    = new WebSocket(`${proto}//${location.host}/ws`)
 
-    ws.onopen  = () => { stat.textContent = 'live'; stat.className = 'connected' }
+    ws.onopen = () => { dot.className = 'live'; setArc(0.15, '#00e5ff') }
     ws.onclose = () => {
-      stat.textContent = 'reconnecting…'; stat.className = ''
+      dot.className = ''
       setTimeout(connect, 2000)
     }
     ws.onerror = () => ws.close()
 
     ws.onmessage = ({ data }) => {
-      let msg
-      try { msg = JSON.parse(data) } catch { return }
-
-      if (msg.type === 'state') {
-        applyState(msg)
-      } else if (msg.type === 'ar_signal') {
-        applyState({ ...state, arSignal: msg.signal, arReason: msg.reason })
-      } else if (msg.type === 'session_start') {
-        applyState({ ...state, sessionActive: true, sessionId: msg.sessionId, sessionStartTs: msg.ts, turnCount: 0 })
-      } else if (msg.type === 'session_end') {
-        applyState({ ...state, sessionActive: false })
-      }
+      let msg; try { msg = JSON.parse(data) } catch { return }
+      if      (msg.type === 'state')         apply(msg)
+      else if (msg.type === 'ar_signal')     apply({ arSignal: msg.signal, arReason: msg.reason })
+      else if (msg.type === 'session_start') apply({ sessionActive: true,  sessionId: msg.sessionId, sessionStartTs: msg.ts, turnCount: 0 })
+      else if (msg.type === 'session_end')   apply({ sessionActive: false })
     }
   }
 

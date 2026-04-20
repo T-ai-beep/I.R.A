@@ -376,8 +376,15 @@
     }
   }
 
+  // Live refresh via WebSocket
+  const _wsp = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const _ws  = new WebSocket(`${_wsp}//${location.host}/ws`)
+  _ws.onmessage = ({ data }) => {
+    try { const m = JSON.parse(data); if (m.type === 'decision' || m.type === 'session_end') load() } catch {}
+  }
+  _ws.onerror = () => {}
+
   load()
-  // Refresh every 30s
   setInterval(load, 30_000)
 </script>
 </body>
