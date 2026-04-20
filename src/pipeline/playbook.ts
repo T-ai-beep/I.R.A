@@ -738,7 +738,7 @@ const FORCED_FALLBACKS: Partial<Record<EventType, string>> = {
   PRICE_OBJECTION: 'What part of the price concerns you most?',
   AGREEMENT:       'Good. Who signs and what is the timeline?',
   COMPETITOR:      'What is the one thing your current system does not handle?',
-  AUTHORITY:       'Who is the final decision maker and can we get them on a call?',
+  AUTHORITY:       'Who decides — can we get them on a call?',
   OFFER_DISCUSS:   'What would make this number feel right to you?',
   DEADLINE:        'What needs to happen before that date?',
 }

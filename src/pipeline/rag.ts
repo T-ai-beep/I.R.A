@@ -206,9 +206,12 @@ export async function ragQuery(
 // ── Add a note to knowledge base ──────────────────────────────────────────
 export async function addNote(text: string, filename?: string): Promise<void> {
   const rawName = filename ?? `note_${Date.now()}.txt`
-  // Prevent path traversal: reject filenames that contain directory separators
+  // Reject path traversal: Unix separators caught by basename comparison;
+  // also reject backslashes (Windows traversal on Linux) and URL-encoded dots/slashes
   const name = path.basename(rawName)
-  if (name !== rawName) throw new Error(`[RAG] addNote: invalid filename "${rawName}"`)
+  if (name !== rawName || /[\\%]/.test(name)) {
+    throw new Error(`[RAG] addNote: invalid filename "${rawName}"`)
+  }
   const filepath = path.join(KB_DIR, name)
   fs.writeFileSync(filepath, text)
 

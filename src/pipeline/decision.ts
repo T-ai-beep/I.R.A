@@ -101,7 +101,12 @@ const RE_DEADLINE    = /deadline|by friday|by monday|end of week|next week|asap/
 // Runs once per transcript. Result feeds coach, memory context, and LLM.
 
 export function classifyEvent(transcript: string): EventType {
-  const t = transcript.slice(0, CONFIG.MAX_TRANSCRIPT_CHARS).toLowerCase()
+  // Strip non-ASCII (emoji, CJK, etc.) and collapse runs of spaces so
+  // "can't 💸 afford" normalizes to "can't afford" before regex matching
+  const t = transcript.slice(0, CONFIG.MAX_TRANSCRIPT_CHARS)
+    .replace(/[^\x00-\x7F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .toLowerCase()
 
   if (RE_PRICE_OBJECTION.some(r => r.test(t))) return 'PRICE_OBJECTION'
   if (RE_AUTHORITY.some(r => r.test(t)))        return 'AUTHORITY'
@@ -329,8 +334,21 @@ async function decideNonNegotiation(
 }
 
 // ── decide() — single entry point ─────────────────────────────────────────
+// Serialized via a lock: concurrent calls queue up rather than corrupting the
+// stateful CoachSession singleton. In production speech is serial anyway.
 
-export async function decide(transcript: string): Promise<string | null> {
+let _decideLock: Promise<void> = Promise.resolve()
+
+export function decide(transcript: string): Promise<string | null> {
+  const waitFor = _decideLock
+  let release!: () => void
+  _decideLock = new Promise<void>(r => { release = r })
+  return waitFor
+    .then(() => _decideImpl(transcript))
+    .finally(() => release())
+}
+
+async function _decideImpl(transcript: string): Promise<string | null> {
   if (!transcript || !transcript.trim()) return null
 
   const t0         = Date.now()
